@@ -1,0 +1,31 @@
+{
+  "name": "phira-api-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Independent HTTPS API Gateway for Phira official API forwarding and private chart testing.",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "start:quick": "node scripts/process-control.js start",
+    "stop": "node scripts/process-control.js stop",
+    "test:multiplayer": "npm run build && node scripts/test-multiplayer.js",
+    "test:rating": "npm run build && node scripts/test-private-rating.js",
+    "test:instances": "npm run build && node scripts/test-instances.js",
+    "test:visibility": "npm run build && node scripts/test-instance-visibility.js",
+    "analyze:private-tokens": "node scripts/analyze-private-tokens.js",
+    "dev": "tsx watch src/index.ts",
+    "cert:generate": "node scripts/generate-cert.js"
+  },
+  "dependencies": {
+    "selfsigned": "^2.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

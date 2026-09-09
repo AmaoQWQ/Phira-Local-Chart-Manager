@@ -1,0 +1,39 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.phira-api-probe.pid
+
+certs/*.crt
+certs/*.key
+logs/*.log
+data/private-records/token-capture*.jsonl
+data/private-records/records.json
+
+# Private or potentially copyrighted chart assets. Deploy these separately.
+charts/*.zip
+data/private-charts/*
+data/instances/*
+data/instances-test-default/
+data/test-instances/
+
+# Runtime accounts, scores, captures, test data and generated screenshots.
+data/
+artifacts/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.jsonl
+
+# Local verification material and private chart packages must never be published.
+decoder/*.bin
+*.zip
+*.pez
+*.pem
+*.pfx
+*.p12
+
+!certs/.gitkeep
+!logs/.gitkeep
