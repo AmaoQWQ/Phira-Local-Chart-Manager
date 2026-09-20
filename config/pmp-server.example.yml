@@ -1,0 +1,35 @@
+# Phira Local Chart Manager 配套 PMP+ 的最小配置示例。
+# 完整配置说明：https://github.com/AmaoQWQ/Phira-mp-plus/blob/main/docs/deployment.md
+
+# 游戏客户端连接端口。
+port: 12356
+
+# 仅供本机 Gateway 调用的管理接口，不应直接暴露到公网。
+http_port: 12357
+http_bind_address: "127.0.0.1"
+
+# PMP+ 用它认证玩家，并读取私有谱面与成绩。
+phira_api_endpoint: "http://127.0.0.1:9000"
+
+# 请填写可用的 PostgreSQL 连接串。
+database_url: ""
+
+# 真实管理令牌建议通过 .env 中的 PMP_ADMIN_TOKEN 注入，不要写进本文件。
+admin_token: ""
+
+# 是否允许普通 Phira 客户端自行创建房间。
+room_creation_enabled: true
+
+chat_enabled: true
+cli_enabled: false
+
+idle:
+  dangle_grace_secs: 10
+  playing_reconnect_grace_secs: 5
+
+# 自动更新必须指向定制 fork，不能切换到上游原版。
+auto_update:
+  enabled: false
+  check_interval_secs: 3600
+  min_idle_minutes: 10
+  github_repo: "AmaoQWQ/Phira-mp-plus"

@@ -29,19 +29,11 @@ artifacts/
 # build outputs, and the pack is artwork with no redistribution grant.
 vendor/
 
-# PMP+ source is vendored into this private repository. Keep its independent local
-# Git metadata, real configuration, plugins and runtime/build outputs out of commits.
-mp-server/.git/
-mp-server/server_config.yml
-mp-server/docker-compose.yml
-mp-server/plugins/
-mp-server/target/
-mp-server/**/target/
-mp-server/data/
-mp-server/log/
-mp-server/logs/
-mp-server/*.log
-mp-server/**/*.wasm
+# The customized PMP+ source lives in its own repository. Only local runtime
+# binaries, configuration, plugins and data are kept here, and none are committed.
+pmp-runtime/
+# Ignore any legacy local checkout/config left from versions that vendored PMP+.
+mp-server/
 
 # Local deployment handoff notes may contain machine-specific operational details.
 DESIGN.md

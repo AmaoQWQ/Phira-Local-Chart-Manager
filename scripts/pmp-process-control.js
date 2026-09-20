@@ -4,9 +4,9 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 
 const projectRoot = path.resolve(__dirname, "..");
-const pmpRoot = path.join(projectRoot, "mp-server");
+const pmpRoot = path.join(projectRoot, "pmp-runtime");
 const executableName = process.platform === "win32" ? "phira-mp-plus-server.exe" : "phira-mp-plus-server";
-const pmpExecutable = path.join(pmpRoot, "target", "release", executableName);
+const pmpExecutable = path.join(pmpRoot, "bin", executableName);
 const pmpConfig = path.join(pmpRoot, "server_config.yml");
 const pidFile = path.join(projectRoot, ".phira-pmp-plus.pid");
 const outputLog = path.join(projectRoot, "logs", "pmp-server.log");
@@ -184,7 +184,7 @@ async function startOptional() {
     const message = error && error.message ? error.message : String(error);
     console.warn(`PMP+ 未启动：${message}`);
     console.warn("快速启动将继续启动网页管理服务；多人房间功能暂不可用。");
-    console.warn("如需 PMP+，请按 README 编译 mp-server 并完成配置。");
+    console.warn("如需 PMP+，请先运行 npm run install:pmp，再按 README 完成配置。");
   }
 }
 

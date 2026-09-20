@@ -97,7 +97,7 @@ export function loadConfig(): Config {
     port: positiveIntegerFromEnv("PORT", 443),
     adminPort: positiveIntegerFromEnv("ADMIN_PORT", 9000),
     // The in-process multiplayer server is a legacy test/fallback implementation.
-    // Production multiplayer is provided by the colocated mp-server/PMP+ service.
+    // Production multiplayer is provided by the separately installed PMP+ fork.
     multiplayerEnabled: booleanFromEnv("MULTIPLAYER_ENABLED", false),
     multiplayerHost: process.env.MULTIPLAYER_HOST || "0.0.0.0",
     multiplayerPort: positiveIntegerFromEnv("MULTIPLAYER_PORT", 12348),

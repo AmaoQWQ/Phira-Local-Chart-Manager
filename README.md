@@ -100,11 +100,13 @@ npm start
 
 管理页面地址和客户端连接地址由部署者提供。不要为了方便而把仅供本机维护的端口直接暴露到公网。
 
-## 可选：编译修改版 PMP+
+## 可选：安装定制版 PMP+
 
 PMP+ 用于多人房间，不是网页管理服务的必需组件。不需要多人功能时可以跳过本节。
 
-本仓库 `mp-server/` 中收录的是基于 [HyperSynapseNetwork/Phira-mp-plus](https://github.com/HyperSynapseNetwork/Phira-mp-plus) 修改的源码，**不等同于上游 PMP+ Release 中的可执行文件**。本项目的网页房间管理依赖下列定制功能，因此请编译仓库内的这份源码，不要直接用上游二进制替换：
+PMP+ 源码已拆分到独立 fork：[AmaoQWQ/Phira-mp-plus](https://github.com/AmaoQWQ/Phira-mp-plus)。本仓库不再内嵌 `mp-server/` 源码。当前 Gateway 与 fork 的 `v1.0.49` 配套，**不要用 [HyperSynapseNetwork 上游](https://github.com/HyperSynapseNetwork/Phira-mp-plus) 的原版 Release 直接替换**，因为原版不包含本项目依赖的房间管理接口。
+
+相对上游原版，这个 fork 增加或调整了：
 
 - 新增长期托管房和一次性预约白名单房。
 - 新增基于 `x-admin-token` 的 `/admin/rooms` 原生 HTTP 管理接口，可创建、查询、更新、解散房间，并可调整人数、发送聊天和维护谱池。
@@ -114,24 +116,33 @@ PMP+ 用于多人房间，不是网页管理服务的必需组件。不需要多
 - 将 Playing 状态的默认断线重连宽限从上游的 15 秒调整为 5 秒。
 - Gateway 在服务端转发这些房间管理操作，不会把 PMP+ 管理令牌发给浏览器。
 
-Windows 和常规本机编译：
+Windows x64、Linux x64 和 Linux ARM64 可以直接安装 fork 的已校验 Release：
 
 ~~~powershell
-cd mp-server
-Copy-Item server_config.example.yml server_config.yml
-cargo build --release --package phira-mp-plus-server
-cd ..
+npm.cmd run install:pmp
 ~~~
 
-需要先安装 [Rustup](https://rustup.rs/)；`mp-server/rust-toolchain.toml` 会选择项目所需的 Rust 工具链。编译完成后，Windows 启动脚本会使用：
+该命令从 `AmaoQWQ/Phira-mp-plus` 的 `v1.0.49` Release 下载当前平台的程序，使用 Release 中的 `SHA256SUMS` 校验，然后安装到 `pmp-runtime/bin/`。首次安装会迁移旧版 `mp-server/server_config.yml`；没有旧配置时，则从 [config/pmp-server.example.yml](config/pmp-server.example.yml) 生成 `pmp-runtime/server_config.yml`。重复安装不会覆盖已有配置。
+
+如果希望自行审查并编译，或当前平台没有预编译包，请在本仓库之外克隆 fork：
+
+~~~powershell
+git clone https://github.com/AmaoQWQ/Phira-mp-plus.git
+cd Phira-mp-plus
+git checkout v1.0.49
+cargo build --locked --release --package phira-mp-plus-server
+~~~
+
+需要先安装 [Rustup](https://rustup.rs/)，项目中的 `rust-toolchain.toml` 会选择所需工具链。编译完成后，把程序复制到本项目的以下位置：
 
 ~~~text
-mp-server/target/release/phira-mp-plus-server.exe
+pmp-runtime/bin/phira-mp-plus-server.exe    # Windows
+pmp-runtime/bin/phira-mp-plus-server        # Linux
 ~~~
 
 启动 PMP+ 前还需要：
 
-1. 按 [mp-server/server_config.example.yml](mp-server/server_config.example.yml) 修改本机的 `mp-server/server_config.yml`，特别是 PostgreSQL `database_url`。
+1. 修改本机的 `pmp-runtime/server_config.yml`，特别是 PostgreSQL `database_url`；手动编译时可从 [配置示例](config/pmp-server.example.yml) 复制。
 2. 在 `.env` 中设置独立的 `HSN_SECRET_KEY`，使 PMP+ 在重启后保持稳定节点身份。
 3. 设置 `PMP_ADMIN_TOKEN`；留空时会沿用 Gateway 的 `ADMIN_TOKEN`。
 4. 启动 PostgreSQL，并确保 PMP+ 能连接配置的数据库。
@@ -143,7 +154,7 @@ npm.cmd run start:pmp
 npm.cmd run status:pmp
 ~~~
 
-更完整的 PMP+ 配置、端口和数据库说明见 [mp-server/README.md](mp-server/README.md) 和 [mp-server/docs/deployment.md](mp-server/docs/deployment.md)。
+更完整的 PMP+ 配置、端口、数据库及源码编译说明见 fork 的 [README](https://github.com/AmaoQWQ/Phira-mp-plus/blob/main/README.md) 和 [部署文档](https://github.com/AmaoQWQ/Phira-mp-plus/blob/main/docs/deployment.md)。
 
 ## 账号与权限
 
@@ -236,7 +247,7 @@ illustrator: Example Artist
 
 ## 多人房间
 
-多人功能由随项目提供的 PMP+ 组件支持。用户通过部署者提供的服务器地址连接。
+多人功能由独立部署的 [定制版 PMP+](https://github.com/AmaoQWQ/Phira-mp-plus) 支持。用户通过部署者提供的服务器地址连接。
 
 房间支持选谱、准备、同步开始、游戏状态与结果广播。私有谱面参与多人游戏时，所有玩家都需要能够访问同一个谱面服务。
 

@@ -754,6 +754,8 @@ $expiresAt = [DateTime]::UtcNow.AddDays(7).ToString('o')
 
 ## 9. 多人房间监控与管理
 
+本节房间接口依赖 [AmaoQWQ/Phira-mp-plus](https://github.com/AmaoQWQ/Phira-mp-plus) 定制 fork，当前兼容版本为 [`v1.0.49`](https://github.com/AmaoQWQ/Phira-mp-plus/releases/tag/v1.0.49)。可以使用该版本 Release，或从对应 tag 自行编译。HyperSynapseNetwork 上游原版没有 `/admin/rooms`、托管房持久化及本项目使用的扩展字段，不能直接替换。PMP+ 是独立服务，不属于本仓库源码；Gateway 通过 `PMP_BASE_URL` 和 `PMP_ADMIN_TOKEN` 在服务端调用它。
+
 房间列表接口使用管理会话，不接受浏览器提交的 `instanceId` 作为授权依据。服务端会先从 PMP 快照解析房间，再根据房间当前谱面反查实例；无权房间统一返回 `404`。
 
 ```http
