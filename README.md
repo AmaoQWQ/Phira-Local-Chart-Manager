@@ -104,7 +104,7 @@ npm start
 
 PMP+ 用于多人房间，不是网页管理服务的必需组件。不需要多人功能时可以跳过本节。
 
-PMP+ 源码已拆分到独立 fork：[AmaoQWQ/Phira-mp-plus](https://github.com/AmaoQWQ/Phira-mp-plus)。本仓库不再内嵌 `mp-server/` 源码。当前 Gateway 与 fork 的 `v1.0.49` 配套，**不要用 [HyperSynapseNetwork 上游](https://github.com/HyperSynapseNetwork/Phira-mp-plus) 的原版 Release 直接替换**，因为原版不包含本项目依赖的房间管理接口。
+PMP+ 源码已拆分到独立 fork：[AmaoQWQ/Phira-mp-plus](https://github.com/AmaoQWQ/Phira-mp-plus)。本仓库不再内嵌 `mp-server/` 源码。当前 Gateway 与 fork 的 `v1.0.50` 配套，**不要用 [HyperSynapseNetwork 上游](https://github.com/HyperSynapseNetwork/Phira-mp-plus) 的原版 Release 直接替换**，因为原版不包含本项目依赖的房间管理接口。
 
 相对上游原版，这个 fork 增加或调整了：
 
@@ -122,14 +122,14 @@ Windows x64、Linux x64 和 Linux ARM64 可以直接安装 fork 的已校验 Rel
 npm.cmd run install:pmp
 ~~~
 
-该命令从 `AmaoQWQ/Phira-mp-plus` 的 `v1.0.49` Release 下载当前平台的程序，使用 Release 中的 `SHA256SUMS` 校验，然后安装到 `pmp-runtime/bin/`。首次安装会迁移旧版 `mp-server/server_config.yml`；没有旧配置时，则从 [config/pmp-server.example.yml](config/pmp-server.example.yml) 生成 `pmp-runtime/server_config.yml`。重复安装不会覆盖已有配置。
+该命令从 `AmaoQWQ/Phira-mp-plus` 的配套 Release 下载当前平台的程序，使用 Release 中的 `SHA256SUMS` 校验，然后安装到 `pmp-runtime/bin/`。首次安装会迁移旧版 `mp-server/server_config.yml`、插件和运行数据；没有旧配置时，则从 [config/pmp-server.example.yml](config/pmp-server.example.yml) 生成 `pmp-runtime/server_config.yml`。重复安装不会覆盖已有配置。升级已有程序前请先运行 `npm.cmd run stop:pmp`；旧版 PMP+ 仍在运行时，安装器也会跳过可能仍在写入的数据目录。
 
 如果希望自行审查并编译，或当前平台没有预编译包，请在本仓库之外克隆 fork：
 
 ~~~powershell
 git clone https://github.com/AmaoQWQ/Phira-mp-plus.git
 cd Phira-mp-plus
-git checkout v1.0.49
+git checkout v1.0.50
 cargo build --locked --release --package phira-mp-plus-server
 ~~~
 

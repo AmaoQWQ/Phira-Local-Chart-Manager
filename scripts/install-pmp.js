@@ -3,13 +3,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const repository = "AmaoQWQ/Phira-mp-plus";
-const version = "v1.0.49";
+const version = "v1.0.50";
 const projectRoot = path.resolve(__dirname, "..");
 const runtimeRoot = path.join(projectRoot, "pmp-runtime");
 const binRoot = path.join(runtimeRoot, "bin");
 const configPath = path.join(runtimeRoot, "server_config.yml");
 const configExample = path.join(projectRoot, "config", "pmp-server.example.yml");
-const legacyConfig = path.join(projectRoot, "mp-server", "server_config.yml");
+const legacyRoot = path.join(projectRoot, "mp-server");
+const legacyConfig = path.join(legacyRoot, "server_config.yml");
+const pidFile = path.join(projectRoot, ".phira-pmp-plus.pid");
 
 function releaseAsset() {
   if (process.platform === "win32" && process.arch === "x64") {
@@ -53,8 +55,32 @@ function expectedChecksum(checksums, assetName) {
   return match[1].toLowerCase();
 }
 
+function managedPmpIsRunning() {
+  if (!fs.existsSync(pidFile)) return false;
+  const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && error.code === "EPERM");
+  }
+}
+
+function migrateLegacyDirectory(name) {
+  const source = path.join(legacyRoot, name);
+  const target = path.join(runtimeRoot, name);
+  if (!fs.existsSync(source) || fs.existsSync(target)) return false;
+  fs.cpSync(source, target, { recursive: true });
+  return true;
+}
+
 async function main() {
   const asset = releaseAsset();
+  const executablePath = path.join(binRoot, asset.executable);
+  if (fs.existsSync(executablePath) && managedPmpIsRunning()) {
+    throw new Error("PMP+ 正在运行，无法安全替换程序；请先运行 npm run stop:pmp。");
+  }
   console.log(`正在安装 ${repository} ${version}（${asset.name}）...`);
   const [binary, checksums] = await Promise.all([download(asset.name), download("SHA256SUMS")]);
   const expected = expectedChecksum(checksums, asset.name);
@@ -62,7 +88,6 @@ async function main() {
   if (actual !== expected) throw new Error(`校验失败：期望 ${expected}，实际 ${actual}`);
 
   fs.mkdirSync(binRoot, { recursive: true });
-  const executablePath = path.join(binRoot, asset.executable);
   const temporaryPath = `${executablePath}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temporaryPath, binary, { mode: 0o755 });
@@ -88,6 +113,13 @@ async function main() {
     console.log(`已生成 ${path.relative(projectRoot, configPath)}；启动前请填写 database_url。`);
   } else {
     console.log(`保留现有配置：${path.relative(projectRoot, configPath)}`);
+  }
+
+  if (migrateLegacyDirectory("plugins")) console.log("已迁移旧 PMP+ 插件目录。");
+  if (managedPmpIsRunning() && fs.existsSync(path.join(legacyRoot, "data")) && !fs.existsSync(path.join(runtimeRoot, "data"))) {
+    console.warn("旧 PMP+ 仍在运行，暂不复制活动数据；请先运行 npm run stop:pmp，再重新运行 npm run install:pmp。");
+  } else if (migrateLegacyDirectory("data")) {
+    console.log("已迁移旧 PMP+ 运行数据目录。");
   }
 }
 
