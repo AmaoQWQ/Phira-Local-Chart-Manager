@@ -69,10 +69,18 @@ cp .env.example .env
 .\start-probe.cmd
 ~~~
 
+`start-probe.cmd` 会先尝试启动可选的 PMP+ 多人服务，然后启动网页管理服务。如果 PMP+ 尚未编译、未配置或启动失败，脚本会显示警告并继续启动网页管理服务；此时只是多人房间功能不可用。
+
 也可以直接运行：
 
 ~~~powershell
 npm.cmd run start:quick
+~~~
+
+只启动网页管理服务：
+
+~~~powershell
+npm.cmd run start:gateway
 ~~~
 
 停止服务：
@@ -88,7 +96,54 @@ npm run build
 npm start
 ~~~
 
+启动脚本只会打开命令行日志窗口，不会自动打开浏览器。默认本机管理地址是 `http://127.0.0.1:9000/admin`；HTTPS 入口是 `https://localhost/admin`。如果修改了 `.env` 中的 `ADMIN_PORT` 或 `PORT`，地址中的端口也要相应修改。本地自签名 HTTPS 证书会触发浏览器安全提示。
+
 管理页面地址和客户端连接地址由部署者提供。不要为了方便而把仅供本机维护的端口直接暴露到公网。
+
+## 可选：编译修改版 PMP+
+
+PMP+ 用于多人房间，不是网页管理服务的必需组件。不需要多人功能时可以跳过本节。
+
+本仓库 `mp-server/` 中收录的是基于 [HyperSynapseNetwork/Phira-mp-plus](https://github.com/HyperSynapseNetwork/Phira-mp-plus) 修改的源码，**不等同于上游 PMP+ Release 中的可执行文件**。本项目的网页房间管理依赖下列定制功能，因此请编译仓库内的这份源码，不要直接用上游二进制替换：
+
+- 新增长期托管房和一次性预约白名单房。
+- 新增基于 `x-admin-token` 的 `/admin/rooms` 原生 HTTP 管理接口，可创建、查询、更新、解散房间，并可调整人数、发送聊天和维护谱池。
+- 新增 `HOST_SELECT` 和 `POOL_RANDOM` 选谱模式，以及房主、容量和允许用户列表控制。
+- 新增 `mp_managed_rooms` 持久化及重启恢复；管理员解散时会保存删除状态，避免房间在重启后被误恢复。
+- 新增可选的房间事件和比赛结果回调，以及禁止普通客户端建房的配置开关。
+- 将 Playing 状态的默认断线重连宽限从上游的 15 秒调整为 5 秒。
+- Gateway 在服务端转发这些房间管理操作，不会把 PMP+ 管理令牌发给浏览器。
+
+Windows 和常规本机编译：
+
+~~~powershell
+cd mp-server
+Copy-Item server_config.example.yml server_config.yml
+cargo build --release --package phira-mp-plus-server
+cd ..
+~~~
+
+需要先安装 [Rustup](https://rustup.rs/)；`mp-server/rust-toolchain.toml` 会选择项目所需的 Rust 工具链。编译完成后，Windows 启动脚本会使用：
+
+~~~text
+mp-server/target/release/phira-mp-plus-server.exe
+~~~
+
+启动 PMP+ 前还需要：
+
+1. 按 [mp-server/server_config.example.yml](mp-server/server_config.example.yml) 修改本机的 `mp-server/server_config.yml`，特别是 PostgreSQL `database_url`。
+2. 在 `.env` 中设置独立的 `HSN_SECRET_KEY`，使 PMP+ 在重启后保持稳定节点身份。
+3. 设置 `PMP_ADMIN_TOKEN`；留空时会沿用 Gateway 的 `ADMIN_TOKEN`。
+4. 启动 PostgreSQL，并确保 PMP+ 能连接配置的数据库。
+
+可单独启动并检查 PMP+：
+
+~~~powershell
+npm.cmd run start:pmp
+npm.cmd run status:pmp
+~~~
+
+更完整的 PMP+ 配置、端口和数据库说明见 [mp-server/README.md](mp-server/README.md) 和 [mp-server/docs/deployment.md](mp-server/docs/deployment.md)。
 
 ## 账号与权限
 

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "start:quick": "node scripts/pmp-process-control.js start && node scripts/process-control.js start",
+    "start:quick": "node scripts/pmp-process-control.js start-optional && node scripts/process-control.js start",
     "start:gateway": "node scripts/process-control.js start",
     "start:pmp": "node scripts/pmp-process-control.js start",
     "stop": "node scripts/process-control.js stop && node scripts/pmp-process-control.js stop",

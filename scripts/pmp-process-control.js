@@ -177,6 +177,17 @@ async function start() {
   console.log(`PMP+ 日志：${outputLog}`);
 }
 
+async function startOptional() {
+  try {
+    await start();
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    console.warn(`PMP+ 未启动：${message}`);
+    console.warn("快速启动将继续启动网页管理服务；多人房间功能暂不可用。");
+    console.warn("如需 PMP+，请按 README 编译 mp-server 并完成配置。");
+  }
+}
+
 async function stop() {
   const pid = readPid();
   if (!pid) {
@@ -213,9 +224,10 @@ async function status() {
 async function main() {
   const command = process.argv[2];
   if (command === "start") return start();
+  if (command === "start-optional") return startOptional();
   if (command === "stop") return stop();
   if (command === "status") return status();
-  throw new Error(`用法：node ${path.relative(process.cwd(), __filename)} <start|stop|status>`);
+  throw new Error(`用法：node ${path.relative(process.cwd(), __filename)} <start|start-optional|stop|status>`);
 }
 
 main().catch((error) => {
