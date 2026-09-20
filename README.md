@@ -91,8 +91,6 @@ INSTANCE_REGISTRY_PATH=data/instances/instances.json
 PRIVATE_CHART_LISTING=true
 PRIVATE_RECORDS_PATH=data/private-records/records.json
 PRIVATE_RECORDS_DB_PATH=data/private-records/records.sqlite
-PRIVATE_RECORD_VERIFICATION_KEY_PATH=decoder/record-verification-key.bin
-PRIVATE_RECORD_DECODER_PLUGIN=decoder/decoder-dist/private-upload-adapter.js
 ADMIN_TOKEN=your-admin-token
 MULTIPLAYER_ENABLED=false
 MULTIPLAYER_HOST=0.0.0.0
@@ -214,8 +212,7 @@ http://127.0.0.1:9000/admin
 data/instances/<instance-id>/
 ├── charts/
 ├── records.sqlite
-├── records.json
-└── token-capture.jsonl
+└── records.json
 ```
 
 `default` 实例继续使用原来的 `PRIVATE_CHARTS_PATH`、`PRIVATE_RECORDS_DB_PATH` 等配置，不会自动迁移已有谱面或成绩。禁用实例后，该实例的公网请求返回 `503`，管理页面仍可查看和修改；默认实例不能删除。
@@ -415,23 +412,5 @@ curl -k https://127.0.0.1:8443/health
 ```
 
 ## License
-
-## 成绩解码器插件与无密钥运行模式
-
-成绩上传解码器通过 `PRIVATE_RECORD_DECODER_PLUGIN` 作为可选插件加载，默认使用：
-
-```text
-decoder/decoder-dist/private-upload-adapter.js
-```
-
-真实验签还需要配置：
-
-```text
-PRIVATE_RECORD_VERIFICATION_KEY_PATH=decoder/record-verification-key.bin
-```
-
-`decoder/record-verification-key.bin` 已由 `.gitignore` 排除，不应提交到 GitHub。没有这个密钥，或解码器插件不存在时，网关仍然可以正常启动；注册私有谱面的成绩上传会返回兼容客户端的成功响应，但不会验签，也不会保存成绩。这是本地开发/演示用的假成功模式，不能用于生产环境，否则任何人都可以伪造上传结果。
-
-如果要启用真实成绩验证，请同时提供密钥和插件，并重启网关。插件可以导出 `handlePrivateUpload`，并从同目录的 `phira-record-decoder.js` 导出 `decodePhiraRecordToken`；也可以在同一个模块中导出两个函数。
 
 本项目代码使用 [MIT License](LICENSE) 发布。该许可证只适用于本项目自有代码，不适用于谱面、音乐、曲绘或其他第三方内容。
