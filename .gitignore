@@ -44,6 +44,7 @@ mp-server/*.log
 mp-server/**/*.wasm
 
 # Local deployment handoff notes may contain machine-specific operational details.
+DESIGN.md
 docs/handoff*.md
 docs/monitor-plan*.md
 
