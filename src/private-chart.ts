@@ -37,6 +37,14 @@ export interface PrivateChartDefinition {
   illustrationExtension?: IllustrationExtension;
   musicExtension?: AudioExtension;
   previewExtension?: AudioExtension;
+  // True when the package ships no dedicated preview entry, so the preview URL is
+  // served from the music file. This avoids a duplicate copy on disk and in every
+  // asset repair pass. Undefined keeps the legacy behaviour for older records.
+  previewIsMusic?: boolean;
+  // Identity of the package the extracted assets were produced from. Startup repair
+  // uses it to tell "already extracted" from "package was replaced" without opening
+  // the package. Absent on records written before this field existed.
+  packageAssets?: { size: number; mtimeMs: number };
 }
 
 interface PersistedCharts {
@@ -63,6 +71,7 @@ type PackageFiles = {
   musicExtension?: AudioExtension;
   preview?: Buffer;
   previewExtension?: AudioExtension;
+  previewIsMusic?: boolean;
   info?: string;
 };
 
@@ -215,6 +224,62 @@ function zipEntries(packageFile: Buffer): Map<string, Buffer> {
   return entries;
 }
 
+/**
+ * Lists entry names by reading only the ZIP central directory at the end of the file.
+ * This answers "does this package ship its own preview entry?" without inflating the
+ * package. Returns null when the directory cannot be read safely, in which case the
+ * caller must leave the stored record untouched.
+ */
+function zipEntryNames(filePath: string): string[] | null {
+  let size: number;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch {
+    return null;
+  }
+  const tailLength = Math.min(size, 1024 * 1024);
+  if (tailLength < 22) return null;
+  const buffer = Buffer.alloc(tailLength);
+  try {
+    const handle = fs.openSync(filePath, "r");
+    try {
+      fs.readSync(handle, buffer, 0, tailLength, size - tailLength);
+    } finally {
+      fs.closeSync(handle);
+    }
+  } catch {
+    return null;
+  }
+  let endOfDirectory = -1;
+  for (let offset = buffer.length - 22; offset >= 0; offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) {
+      endOfDirectory = offset;
+      break;
+    }
+  }
+  if (endOfDirectory < 0) return null;
+  const count = buffer.readUInt16LE(endOfDirectory + 10);
+  const directorySize = buffer.readUInt32LE(endOfDirectory + 12);
+  const directoryOffset = buffer.readUInt32LE(endOfDirectory + 16);
+  // ZIP64 sentinels mean the real directory lives elsewhere; do not guess.
+  if (count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) return null;
+  const base = size - tailLength;
+  const limit = directoryOffset - base + directorySize;
+  if (directoryOffset < base || directoryOffset + directorySize > size || limit > buffer.length) return null;
+  const names: string[] = [];
+  let cursor = directoryOffset - base;
+  for (let index = 0; index < count; index += 1) {
+    if (cursor + 46 > limit || buffer.readUInt32LE(cursor) !== 0x02014b50) return null;
+    const nameLength = buffer.readUInt16LE(cursor + 28);
+    const extraLength = buffer.readUInt16LE(cursor + 30);
+    const commentLength = buffer.readUInt16LE(cursor + 32);
+    if (cursor + 46 + nameLength > limit) return null;
+    names.push(buffer.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8"));
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  return names;
+}
+
 function packageAssets(packageFile: Buffer): PackageFiles {
   const entries = zipEntries(packageFile);
   const names = [...entries.keys()];
@@ -237,13 +302,15 @@ function packageAssets(packageFile: Buffer): PackageFiles {
     const extension = name?.split(".").pop()?.toLocaleLowerCase();
     return extension === "ogg" || extension === "wav" ? extension : extension === "mp3" ? "mp3" : undefined;
   };
+  const dedicatedPreview = previewName ? entries.get(previewName) : undefined;
   return {
     illustration: illustrationName ? entries.get(illustrationName) : undefined,
     illustrationExtension: imageExtension(illustrationName),
     music: musicName ? entries.get(musicName) : undefined,
     musicExtension: audioExtension(musicName),
-    preview: (previewName ? entries.get(previewName) : undefined) || (musicName ? entries.get(musicName) : undefined),
+    preview: dedicatedPreview || (musicName ? entries.get(musicName) : undefined),
     previewExtension: audioExtension(previewName) || audioExtension(musicName),
+    previewIsMusic: !dedicatedPreview && Boolean(musicName),
     info: infoName ? entries.get(infoName)?.toString("utf8") : undefined,
   };
 }
@@ -302,6 +369,20 @@ function validDefinition(value: unknown): value is PrivateChartDefinition {
   return isPrivateChartId(item.id || 0) && typeof item.name === "string" && item.name.trim() !== "";
 }
 
+/**
+ * Asset files this record expects inside its chart directory. Only extensions that
+ * were actually extracted are listed, so a chart whose package has no illustration
+ * simply has nothing to check for that slot. A shared preview reuses the music file
+ * and therefore requires no file of its own.
+ */
+function expectedAssetFiles(chart: PrivateChartDefinition): string[] {
+  const files: string[] = [];
+  if (chart.illustrationExtension) files.push(`illustration.${chart.illustrationExtension}`);
+  if (chart.musicExtension) files.push(`music.${chart.musicExtension}`);
+  if (chart.previewExtension && chart.previewIsMusic !== true) files.push(`preview.${chart.previewExtension}`);
+  return files;
+}
+
 export class PrivateChartStore {
   private readonly metadataPath: string;
   private data: PersistedCharts;
@@ -335,14 +416,44 @@ export class PrivateChartStore {
   private repairExtractedAssets(): void {
     let changed = false;
     for (const chart of this.data.charts) {
-      const packagePath = path.join(this.directoryFor(chart.id), "chart-package.pez");
-      if (!fs.existsSync(packagePath)) continue;
+      const directory = this.directoryFor(chart.id);
+      const packagePath = path.join(directory, "chart-package.pez");
+      let packageStat: fs.Stats;
+      try {
+        packageStat = fs.statSync(packagePath);
+      } catch {
+        continue;
+      }
+      const identity = { size: packageStat.size, mtimeMs: packageStat.mtimeMs };
+      // Fast path: the package is still the one the assets were extracted from and
+      // every expected asset file is present. Nothing has to be read, decompressed or
+      // rewritten, so startup cost scales with the chart count instead of the total
+      // package size. Records written before package identity existed are upgraded in
+      // place on their first successful pass.
+      const expected = expectedAssetFiles(chart);
+      if (expected.length > 0 && this.assetsAreFresh(directory, expected, chart, identity)) {
+        // Records written before preview sharing was recorded never learned whether
+        // their preview is a dedicated entry or a copy of the music file. The package
+        // answers that from its central directory alone, so the redundant copy can be
+        // recognised — and later removed — without inflating anything.
+        if (chart.previewIsMusic === undefined && chart.previewExtension === chart.musicExtension) {
+          const names = zipEntryNames(packagePath);
+          if (names && !names.some((name) => /(?:^|\/)preview\.(?:mp3|ogg|wav)$/i.test(name))) {
+            chart.previewIsMusic = true;
+            changed = true;
+          }
+        }
+        if (!chart.packageAssets) {
+          chart.packageAssets = identity;
+          changed = true;
+        }
+        continue;
+      }
       try {
         const originalPackage = fs.readFileSync(packagePath);
         const clientPackage = normalizePackageForClient(originalPackage);
         if (clientPackage !== originalPackage) fs.writeFileSync(packagePath, clientPackage);
         const extracted = packageAssets(clientPackage);
-        const directory = this.directoryFor(chart.id);
         if (extracted.illustration) {
           const extension = extracted.illustrationExtension || "jpg";
           fs.mkdirSync(directory, { recursive: true });
@@ -361,20 +472,60 @@ export class PrivateChartStore {
             changed = true;
           }
         }
-        if (extracted.preview) {
+        // A package without its own preview entry is served straight from the music
+        // file, so the duplicate preview copy is neither written nor required.
+        const previewIsMusic = extracted.previewIsMusic === true;
+        const previewExtension = extracted.previewExtension || extracted.musicExtension;
+        if (chart.previewExtension !== previewExtension) {
+          chart.previewExtension = previewExtension;
+          changed = true;
+        }
+        if (chart.previewIsMusic !== (previewIsMusic || undefined)) {
+          chart.previewIsMusic = previewIsMusic || undefined;
+          changed = true;
+        }
+        if (extracted.preview && !previewIsMusic) {
           const extension = extracted.previewExtension || extracted.musicExtension || "mp3";
           fs.mkdirSync(directory, { recursive: true });
           fs.writeFileSync(path.join(directory, `preview.${extension}`), extracted.preview);
-          if (chart.previewExtension !== extension) {
-            chart.previewExtension = extension;
-            changed = true;
-          }
         }
+        // Record the identity of the package as it now stands on disk, after any
+        // normalisation rewrite, so the next start-up can take the fast path.
+        const finalStat = fs.statSync(packagePath);
+        chart.packageAssets = { size: finalStat.size, mtimeMs: finalStat.mtimeMs };
+        changed = true;
       } catch {
         // Keep a previously valid chart available if one package is malformed.
       }
     }
     if (changed) this.save();
+  }
+
+  /**
+   * True when the recorded package identity still matches and every expected asset
+   * exists. Records without a recorded identity fall back to comparing timestamps, so
+   * an asset older than its package always forces a full repair.
+   */
+  private assetsAreFresh(
+    directory: string,
+    expected: string[],
+    chart: PrivateChartDefinition,
+    identity: { size: number; mtimeMs: number },
+  ): boolean {
+    const recorded = chart.packageAssets;
+    if (recorded && (recorded.size !== identity.size || recorded.mtimeMs !== identity.mtimeMs)) return false;
+    for (const name of expected) {
+      try {
+        const stat = fs.statSync(path.join(directory, name));
+        // A zero-length asset means a failed extraction, and an asset older than its
+        // package (legacy records only) means the package was replaced.
+        if (stat.size === 0) return false;
+        if (!recorded && stat.mtimeMs + 1000 < identity.mtimeMs) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 
   list(): PrivateChartDefinition[] {
@@ -402,6 +553,9 @@ export class PrivateChartStore {
     const packageCharter = infoValue(extracted.info, "charter");
     const packageComposer = infoValue(extracted.info, "composer");
     const packageIllustrator = infoValue(extracted.info, "illustrator");
+    // The preview reuses the music file only when the package ships no preview entry
+    // and no preview was uploaded alongside it.
+    const previewIsMusic = extracted.previewIsMusic === true && !files.preview;
     const now = new Date().toISOString();
     const chart: PrivateChartDefinition = {
       id,
@@ -424,13 +578,20 @@ export class PrivateChartStore {
       illustrationExtension: extracted.illustrationExtension || (files.illustration ? "jpg" : undefined),
       musicExtension: extracted.musicExtension || (files.music ? "mp3" : undefined),
       previewExtension: extracted.previewExtension || extracted.musicExtension || (files.preview ? "mp3" : undefined),
+      previewIsMusic: previewIsMusic || undefined,
     };
     const directory = this.directoryFor(id);
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, "chart-package.pez"), clientPackage);
     if (files.illustration || extracted.illustration) fs.writeFileSync(path.join(directory, `illustration.${chart.illustrationExtension || "jpg"}`), files.illustration || extracted.illustration!);
     if (files.music || extracted.music) fs.writeFileSync(path.join(directory, `music.${chart.musicExtension || "mp3"}`), files.music || extracted.music!);
-    if (files.preview || extracted.preview) fs.writeFileSync(path.join(directory, `preview.${chart.previewExtension || "mp3"}`), files.preview || extracted.preview!);
+    if (files.preview || (extracted.preview && !previewIsMusic)) fs.writeFileSync(path.join(directory, `preview.${chart.previewExtension || "mp3"}`), files.preview || extracted.preview!);
+    try {
+      const packageStat = fs.statSync(path.join(directory, "chart-package.pez"));
+      chart.packageAssets = { size: packageStat.size, mtimeMs: packageStat.mtimeMs };
+    } catch {
+      // Startup repair records the identity when the file cannot be stat'ed here.
+    }
     this.data.charts.push(chart);
     this.save();
     return chart;
@@ -500,32 +661,41 @@ export class PrivateChartStore {
     return changed;
   }
 
-  delete(id: number): boolean {
+  /**
+   * Removes one chart. Metadata is updated first (cheap and authoritative), then the
+   * asset directory is deleted asynchronously so a multi-gigabyte removal never blocks
+   * the event loop that serves every other request.
+   */
+  async delete(id: number): Promise<boolean> {
     const index = this.data.charts.findIndex((chart) => chart.id === id);
     if (index < 0) return false;
+    const directory = this.checkedDirectory(id);
     this.data.charts.splice(index, 1);
-    const directory = this.directoryFor(id);
-    if (path.dirname(directory) !== path.resolve(this.rootPath)) throw new Error("invalid chart directory");
-    fs.rmSync(directory, { recursive: true, force: true });
     this.save();
+    await fs.promises.rm(directory, { recursive: true, force: true });
     return true;
   }
 
-  deleteMany(ids: number[]): number[] {
+  async deleteMany(ids: number[]): Promise<number[]> {
     const requested = new Set(ids.filter((id) => isPrivateChartId(id)));
-    const deleted: number[] = [];
-    for (const chart of this.data.charts) {
-      if (requested.has(chart.id)) deleted.push(chart.id);
-    }
+    const deleted = this.data.charts.filter((chart) => requested.has(chart.id)).map((chart) => chart.id);
     if (deleted.length === 0) return deleted;
+    // Validate every target before mutating anything, so a bad id cannot leave the
+    // metadata out of sync with the files on disk.
+    const directories = deleted.map((id) => this.checkedDirectory(id));
     this.data.charts = this.data.charts.filter((chart) => !requested.has(chart.id));
-    for (const id of deleted) {
-      const directory = this.directoryFor(id);
-      if (path.dirname(directory) !== path.resolve(this.rootPath)) throw new Error("invalid chart directory");
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
     this.save();
+    const results = await Promise.allSettled(directories.map((directory) => fs.promises.rm(directory, { recursive: true, force: true })));
+    for (const result of results) {
+      if (result.status === "rejected") process.stderr.write(`Failed to remove chart directory: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}\n`);
+    }
     return deleted;
+  }
+
+  private checkedDirectory(id: number): string {
+    const directory = this.directoryFor(id);
+    if (path.dirname(directory) !== path.resolve(this.rootPath)) throw new Error("invalid chart directory");
+    return directory;
   }
 
   directoryFor(id: number): string {
@@ -654,20 +824,30 @@ export function mergePrivateChartsIntoList(
   return nextResponse;
 }
 
+function audioContentType(extension: string): string {
+  return extension === "ogg" ? "audio/ogg" : extension === "wav" ? "audio/wav" : "audio/mpeg";
+}
+
 export function privateResourceForPath(pathname: string, privateChartsPath: string, store?: PrivateChartStore): PrivateResource | null {
   const packageMatch = /^\/private-charts\/(\-?\d+)\.pez$/.exec(pathname);
   const fileMatch = /^\/private-files\/(\-?\d+)\/(illustration|music|preview)\.(jpg|jpeg|png|mp3|ogg|wav)$/.exec(pathname);
   const id = Number(packageMatch?.[1] || fileMatch?.[1] || 0);
   if (!isPrivateChartId(id)) return null;
-  if (store && !store.get(id)) return null;
-  if (!store && id !== PRIVATE_CHART_ID) return null;
+  const definition = store ? store.get(id) : id === PRIVATE_CHART_ID ? legacyDefinition() : null;
+  if (!definition) return null;
   if (packageMatch) return { filePath: path.join(privateChartsPath, String(id), "chart-package.pez"), contentType: "application/octet-stream" };
   if (!fileMatch) return null;
+  const directory = path.join(privateChartsPath, String(id));
+  if (fileMatch[2] === "preview" && definition.previewIsMusic === true) {
+    // No dedicated preview file is stored; the music file is served under the preview URL.
+    const extension = definition.musicExtension || fileMatch[3];
+    return { filePath: path.join(directory, `music.${extension}`), contentType: audioContentType(extension) };
+  }
   const fileName = `${fileMatch[2]}.${fileMatch[3]}`;
   const contentType = fileMatch[2] === "illustration"
     ? fileMatch[3] === "png" ? "image/png" : "image/jpeg"
-    : fileMatch[3] === "ogg" ? "audio/ogg" : fileMatch[3] === "wav" ? "audio/wav" : "audio/mpeg";
-  return { filePath: path.join(privateChartsPath, String(id), fileName), contentType };
+    : audioContentType(fileMatch[3]);
+  return { filePath: path.join(directory, fileName), contentType };
 }
 
 export function isPrivateResourcePath(pathname: string): boolean {

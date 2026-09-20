@@ -6,6 +6,8 @@ const https = require('node:https');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
+const {PERMISSIONS,MANAGER_DEFAULTS,isAccountPermission}=require('../dist/admin-policy');
+function policy(review,manage,revision){const allowed=new Set(manage?PERMISSIONS.filter(p=>!isAccountPermission(p[0])).map(p=>p[0]):[]);if(review)for(const p of ['user.read','application.read','review.approve','review.reject'])allowed.add(p);return {level:review?'manager':manage?'senior':'ordinary',revision,reason:'Regression permission change',assignedInstances:[],grants:PERMISSIONS.filter(p=>allowed.has(p[0])||review&&MANAGER_DEFAULTS.includes(p[0])).map(p=>({permission:p[0],effect:allowed.has(p[0])?'allow':'deny',scope:'all',instanceIds:[],expiresAt:null}))}}
 const root = path.resolve(__dirname, '..');
 const testRoot = fs.mkdtempSync(path.join(root, 'data', 'test-admin-accounts-'));
 const bootstrap = randomUUID(), password = randomUUID();
@@ -26,9 +28,10 @@ async function main() {
     PRIVATE_TOKEN_CAPTURE_PATH: '', LOG_TO_FILE: 'false', DEBUG_BODY: 'true', UPSTREAM_BASE_URL: 'https://127.0.0.1:1' } });
   function request(route, method = 'GET', body, actor, extra = {}, secure = true) {
     return new Promise((resolve, reject) => {
+      if(body&&method==='PATCH'&&/^\/api\/admin\/users\/\d+$/.test(route))body={...body,reason:'Regression account update'};
       const data = body === undefined ? '' : JSON.stringify(body);
       const req = (secure ? https : http).request({ hostname: '127.0.0.1', port: secure ? publicPort : adminPort, path: route, method, rejectUnauthorized: false,
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), 'X-Admin-Request': '1', ...(actor ? { Cookie: actor.cookie, 'X-CSRF-Token': actor.csrf } : {}), ...extra } }, res => {
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), 'X-Admin-Request': '1', 'X-Admin-Reason': 'Regression operation', 'X-Admin-Confirm': route.includes('/instances/')?route.split('/')[4].split('?')[0]:'delete', ...(actor ? { Cookie: actor.cookie, 'X-CSRF-Token': actor.csrf } : {}), ...extra } }, res => {
         const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => { const text = Buffer.concat(chunks).toString(); let payload; try { payload = JSON.parse(text); } catch {} resolve({ status: res.statusCode, data: payload, text, cookies: res.headers['set-cookie'] || [] }); });
       }); req.on('error', reject); req.end(data);
     });
@@ -65,9 +68,9 @@ async function main() {
   assert.equal((await request('/api/admin/auth/application', 'POST', { application: groupApplication }, bob)).status, 422);
   assert.equal((await request('/api/admin/auth/application', 'POST', { application: { ...groupApplication, organization: 'Test Community' } }, bob)).status, 200);
   const reviewer = await auth('register', 'reviewer');
-  assert.equal((await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', { reviewUsers: true, manageInstances: false }, admin)).status, 422);
+  assert.equal((await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', policy(true,false,0), admin)).status, 422);
   await request('/api/admin/users/' + reviewer.user.id + '/review', 'POST', { revision: 1, decision: 'approved' }, admin);
-  assert.equal((await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', { reviewUsers: true, manageInstances: false }, admin)).status, 200);
+  assert.equal((await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', policy(true,false,0), admin)).status, 200);
   assert.equal((await request('/api/admin/users/' + reviewer.user.id + '/review', 'POST', { revision: 1, decision: 'approved' }, reviewer)).status, 403);
   assert.equal((await request('/api/admin/users/' + bob.user.id + '/review', 'POST', { revision: 1, decision: 'approved' }, reviewer)).status, 409, 'Stale application revision must not be approved');
   const decisions = await Promise.all(['approved', 'rejected'].map(decision => request('/api/admin/users/' + bob.user.id + '/review', 'POST', { revision: 2, decision, note: 'Review checked.' }, reviewer)));
@@ -90,12 +93,12 @@ async function main() {
   assert.equal(owned[0].chartsPath, undefined, 'Filesystem paths must not be disclosed');
   const id = owned[0].id;
   assert.equal((await request('/api/admin/dashboard?instance=' + id, 'GET', undefined, reviewer)).status, 403);
-  await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', { reviewUsers: false, manageInstances: true }, admin);
+  await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', policy(false,true,1), admin);
   assert.equal((await request('/api/admin/dashboard?instance=' + id, 'GET', undefined, reviewer)).status, 200);
   assert.equal((await request('/api/admin/instances/' + id, 'PATCH', { name: 'Staff updated' }, reviewer)).status, 200);
   assert.equal((await request('/api/admin/users', 'GET', undefined, reviewer)).status, 403, 'Instance managers cannot read registration profiles without review permission');
   assert.equal((await request('/api/admin/instances/' + id, 'PATCH', { hosts: ['blocked.example'] }, reviewer)).status, 403);
-  await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', { reviewUsers: false, manageInstances: false }, admin);
+  await request('/api/admin/users/' + reviewer.user.id + '/permissions', 'PATCH', policy(false,false,2), admin);
   assert.equal((await request('/api/admin/dashboard?instance=' + id, 'GET', undefined, reviewer)).status, 403, 'Permission revocation must apply to the same session immediately');
   for (const route of ['/api/admin/dashboard', '/api/admin/charts', '/api/admin/records', '/api/admin/download/-1']) {
     assert.equal((await request(route + '?instance=' + id, 'GET', undefined, bob)).status, 403, 'Foreign access must fail: ' + route);
@@ -103,7 +106,7 @@ async function main() {
   for (const method of ['PATCH', 'DELETE']) assert.equal((await request('/api/admin/instances/' + id, method, { name: 'Stolen' }, bob)).status, 403);
   assert.equal((await request('/api/admin/charts/batch-delete?instance=' + id, 'POST', { all: true }, bob)).status, 403);
   assert.equal((await request('/api/admin/instances/' + id, 'PATCH', { hosts: ['phira.5wyxi.com'] }, alice)).status, 403);
-  assert.equal((await request('/api/admin/instances/' + id, 'PATCH', { ownerId: bob.user.id, name: 'Renamed' }, alice)).status, 200);
+  assert.equal((await request('/api/admin/instances/' + id, 'PATCH', { ownerId: bob.user.id, name: 'Renamed' }, alice)).status, 422);
   assert.equal((await request('/api/admin/instances', 'GET', undefined, alice)).data[0].ownerId, alice.user.id);
   assert.equal((await request('/api/admin/users', 'GET', undefined, alice)).status, 403);
   assert.equal((await request('/api/admin/users/' + alice.user.id, 'PATCH', { instanceLimit: 999 }, alice)).status, 403);
@@ -129,6 +132,21 @@ async function main() {
   assert.equal((await request('/api/admin/auth/logout', 'POST', {}, alice3)).status, 200);
   assert.equal((await request('/api/admin/auth/me', 'GET', undefined, alice3)).status, 401);
   assert.equal((await request('/api/admin/users/' + admin.user.id, 'PATCH', { disabled: true }, admin)).status, 422);
+  const alice4 = await auth('login', 'alice', { password: password + '-new' });
+  assert.equal((await request('/api/admin/users/' + alice.user.id, 'DELETE', undefined, admin, { 'X-Admin-Confirm': '' })).status, 422, 'Account deletion requires explicit confirmation');
+  assert.equal((await request('/api/admin/users/' + alice.user.id, 'DELETE', undefined, reviewer)).status, 403, 'Non-super accounts cannot delete users');
+  const aliceInstanceIds = (await request('/api/admin/instances', 'GET', undefined, admin)).data.filter(instance => instance.ownerId === alice.user.id).map(instance => instance.id);
+  assert.ok(aliceInstanceIds.length > 0, 'Deletion fixture must own instances');
+  const deletedAccount = await request('/api/admin/users/' + alice.user.id, 'DELETE', undefined, admin);
+  assert.equal(deletedAccount.status, 200, `Delete account: ${deletedAccount.text}`);
+  assert.deepEqual([...deletedAccount.data.instancesPreserved].sort(), [...aliceInstanceIds].sort(), 'Owned instances are preserved');
+  assert.equal((await request('/api/admin/auth/me', 'GET', undefined, alice4)).status, 401, 'Deleting an account revokes all sessions');
+  assert.equal((await request('/api/admin/auth/login', 'POST', { username: 'alice', password: password + '-new' })).status, 401, 'Deleted account cannot log in');
+  assert.equal((await request('/api/admin/users', 'GET', undefined, admin)).data.some(user => user.id === alice.user.id), false, 'Deleted account leaves the user list');
+  const released = (await request('/api/admin/instances', 'GET', undefined, admin)).data.filter(instance => aliceInstanceIds.includes(instance.id));
+  assert.ok(released.every(instance => instance.ownerId === null), 'Deleted account instances become server-owned');
+  assert.equal((await request('/api/admin/users/' + admin.user.id, 'DELETE', undefined, admin)).status, 422, 'Super administrator cannot delete itself');
+  assert.ok((await request('/api/admin/audit', 'GET', undefined, admin)).data.events.some(event => event.action === 'user.delete' && event.target === String(alice.user.id)), 'Account deletion is audited');
   assert.equal((await request('/api/admin/instances', 'GET', undefined, undefined, { Authorization: 'Bearer ' + bootstrap }, false)).status, 200, 'Local administrative scripts retain compatibility');
   for (const name of fs.readdirSync(testRoot).filter(name => name.startsWith('accounts.sqlite'))) {
     const bytes = fs.readFileSync(path.join(testRoot, name));
@@ -136,9 +154,9 @@ async function main() {
     assert.equal(bytes.includes(Buffer.from(bootstrap)), false, 'Account storage must not contain the bootstrap secret');
     assert.equal(bytes.includes(Buffer.from(alice.cookie.split('=')[1])), false, 'Only session hashes may be persisted');
   }
-  console.log('Account API passed: migration, application validation, pending access restrictions, rejection/resubmission, concurrent reviews, delegated permissions/revocation, protected admin setup, sessions, quota limits, ownership, CSRF, suspension and passwords.');
+  console.log('Account API passed: migration, application validation, pending access restrictions, rejection/resubmission, concurrent reviews, delegated permissions/revocation, protected admin setup, sessions, quota limits, ownership, CSRF, suspension, deletion and passwords.');
 }
-main().catch(error => { console.error(String(error.message).replaceAll(bootstrap, '[REDACTED]').replaceAll(password, '[REDACTED]')); process.exitCode = 1; }).finally(async () => {
+main().catch(error => { console.error(String(error.stack||error).replaceAll(bootstrap, '[REDACTED]').replaceAll(password, '[REDACTED]')); process.exitCode = 1; }).finally(async () => {
   if (child && child.exitCode === null) await new Promise(resolve => { child.once('exit', resolve); child.kill(); });
   const resolved = path.resolve(testRoot);
   if (path.dirname(resolved) !== path.join(root, 'data') || !path.basename(resolved).startsWith('test-admin-accounts-')) throw new Error('Unsafe test cleanup path');

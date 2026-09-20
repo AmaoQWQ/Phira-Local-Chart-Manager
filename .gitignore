@@ -3,11 +3,13 @@ dist/
 .env
 .env.*
 !.env.example
-.phira-api-probe.pid
+.phira-local-chart-manager.pid
+.phira-pmp-plus.pid
 
 certs/*.crt
 certs/*.key
 logs/*.log
+logs/*.pid
 data/private-records/token-capture*.jsonl
 data/private-records/records.json
 
@@ -21,6 +23,30 @@ data/test-instances/
 # Runtime accounts, scores, captures, test data and generated screenshots.
 data/
 artifacts/
+
+# Compiled from the MIT-licensed phira-web-monitor sources by `npm run build:renderer`.
+# The WASM renderer, the chart-compiler binary and any third-party resource pack are
+# build outputs, and the pack is artwork with no redistribution grant.
+vendor/
+
+# PMP+ source is vendored into this private repository. Keep its independent local
+# Git metadata, real configuration, plugins and runtime/build outputs out of commits.
+mp-server/.git/
+mp-server/server_config.yml
+mp-server/docker-compose.yml
+mp-server/plugins/
+mp-server/target/
+mp-server/**/target/
+mp-server/data/
+mp-server/log/
+mp-server/logs/
+mp-server/*.log
+mp-server/**/*.wasm
+
+# Local deployment handoff notes may contain machine-specific operational details.
+docs/handoff*.md
+docs/monitor-plan*.md
+
 *.sqlite
 *.sqlite-*
 *.db

@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { AdminAccountStore, AdminError, checkAdminMutation, validBootstrapToken, hasAdminPermission, type AdminIdentity } from "./admin-accounts";
+import { spawn } from "node:child_process";
+import os from "node:os";
+import { pathToFileURL } from "node:url";
+import { AdminAccountStore, AdminError, checkAdminMutation, validBootstrapToken, type AdminIdentity } from "./admin-accounts";
+import { can, canManageAccount, canViewAllRooms, instanceCapabilities, LEVELS, PERMISSIONS, type Permission } from "./admin-policy";
 import { PhiraViewerResolver } from "./phira-viewer";
 import http from "node:http";
 import https from "node:https";
@@ -23,11 +27,18 @@ import {
 import {
   privateUploadChartId,
   capturePrivateUploadToken,
+  privateOpaqueUploadAcknowledgement,
   normalizePrivateRecordSummary,
 } from "./private-record";
 import { PrivateRecordSqliteStore as PrivateRecordStore } from "./private-record-sqlite";
+import { loadRecordDecoderPlugin } from "./record-decoder-plugin";
 import { MultiplayerServer } from "./multiplayer";
+import { contentTypeForAsset, listMonitorAssets, MonitorChartCompiler, monitorAssetPath } from "./monitor-preview";
+import { PmpRoomMonitor } from "./monitor-rooms";
+import { PmpAdminClient, PmpAdminError } from "./pmp-admin";
 import { adminUi } from "./admin-ui";
+import { homepageUi } from "./homepage-ui";
+import { documentPdfHtml } from "./doc-pdf";
 import {
   ChartServiceInstanceRegistry,
   DEFAULT_INSTANCE_ID,
@@ -36,16 +47,26 @@ import {
   type ChartServiceInstanceRuntime,
 } from "./instances";
 
-const { handlePrivateUpload } = require("../decoder/decoder-dist/private-upload-adapter.js") as {
-  handlePrivateUpload: (body: unknown, dependencies: Record<string, unknown>) => Promise<unknown>;
-};
-const { decodePhiraRecordToken } = require("../decoder/decoder-dist/phira-record-decoder.js") as {
-  decodePhiraRecordToken: (token: string, options: { key: Buffer; expectedChartId?: number; expectedUserId?: number }) => any;
-};
-
 const MAX_BODY_PREVIEW_BYTES = 4096;
 const MAX_PROXY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_ADMIN_BODY_BYTES = 768 * 1024 * 1024;
+const PROFILE_CACHE_MS = 10 * 60 * 1000;
+const HOMEPAGE_HOST = "charts.example.com";
+const DOC_FILES: Record<string, string> = {
+  user: "USER.md",
+  api: "docs/API.md",
+  readme: "README.md",
+};
+const DOC_PDF_TITLES: Record<string, string> = {
+  user: "Phira 用户接入指南",
+  api: "Phira API 文档",
+  readme: "Phira 本地谱面管理系统",
+};
+const DOC_PDF_FILENAMES: Record<string, string> = {
+  user: "phira-user-guide.pdf",
+  api: "phira-api.pdf",
+  readme: "phira-readme.pdf",
+};
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -105,6 +126,85 @@ function html(response: ServerResponse, body: string): void {
   response.end(body);
 }
 
+function hostMatches(value: string | string[] | undefined, expected: string): boolean {
+  const entries = Array.isArray(value) ? value : value ? [value] : [];
+  return entries.some((raw) => raw.split(",").some((item) => {
+    const host = item.trim().toLocaleLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/:\d+$/, "")
+      .replace(/\.$/, "");
+    return host === expected;
+  }));
+}
+
+function findPdfBrowser(): string | null {
+  const candidates = [
+    process.env.PDF_BROWSER_PATH,
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/microsoft-edge",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Ignore invalid paths.
+    }
+  }
+  return null;
+}
+
+async function renderPdfFromHtml(html: string): Promise<Buffer> {
+  const browser = findPdfBrowser();
+  if (!browser) throw new Error("此服务器未安装可用于生成 PDF 的无头浏览器");
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "phira-doc-pdf-"));
+  try {
+    const htmlPath = path.join(temporaryRoot, "document.html");
+    const pdfPath = path.join(temporaryRoot, "document.pdf");
+    const profilePath = path.join(temporaryRoot, "edge-profile");
+    fs.mkdirSync(profilePath, { recursive: true });
+    fs.writeFileSync(htmlPath, html, "utf8");
+    const args = [
+      "--headless",
+      "--disable-gpu",
+      "--no-first-run",
+      "--hide-scrollbars",
+      "--window-size=1280,1600",
+      "--print-to-pdf-no-header",
+      `--print-to-pdf=${pdfPath}`,
+      `--user-data-dir=${profilePath}`,
+      pathToFileURL(htmlPath).href,
+    ];
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(browser, args, { windowsHide: true, stdio: "ignore" });
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error("PDF 生成超时"));
+      }, 60_000);
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    if (!fs.existsSync(pdfPath)) throw new Error("PDF 文件未生成");
+    return fs.readFileSync(pdfPath);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
 type MultipartPart = { value: string | Buffer; filename?: string };
 
 function parseMultipart(body: Buffer, contentType: string): Map<string, MultipartPart> {
@@ -147,17 +247,50 @@ function decodeBase64(value: unknown, field: string): Buffer | undefined {
   return decoded;
 }
 
+/**
+ * Evaluates If-None-Match / If-Modified-Since. A conditional request is checked before
+ * Range handling, matching RFC 7232 precedence.
+ */
+function isNotModified(request: IncomingMessage, fileStat: fs.Stats, etag: string): boolean {
+  const ifNoneMatch = request.headers["if-none-match"];
+  if (typeof ifNoneMatch === "string") {
+    return ifNoneMatch.split(",").some((part) => {
+      const tag = part.trim().replace(/^W\//, "");
+      return tag === "*" || tag === etag;
+    });
+  }
+  const ifModifiedSince = request.headers["if-modified-since"];
+  if (typeof ifModifiedSince !== "string") return false;
+  const since = Date.parse(ifModifiedSince);
+  // Last-Modified has one-second resolution, so compare at that resolution.
+  return Number.isFinite(since) && Math.floor(fileStat.mtimeMs / 1000) * 1000 <= since;
+}
+
 function sendFile(
   request: IncomingMessage,
   response: ServerResponse,
   filePath: string,
   contentType: string,
+  cacheControl = "private, no-store",
 ): void {
-  let fileSize: number;
+  let fileStat: fs.Stats;
   try {
-    fileSize = fs.statSync(filePath).size;
+    fileStat = fs.statSync(filePath);
   } catch {
     json(response, { code: "NOT_FOUND", error: "private resource not found" }, 404);
+    return;
+  }
+  const fileSize = fileStat.size;
+
+  // A chart resource never changes behind its id, so a validator lets clients skip
+  // re-downloading files that are tens of megabytes.
+  const etag = `"${fileSize.toString(16)}-${Math.floor(fileStat.mtimeMs).toString(16)}"`;
+  response.setHeader("ETag", etag);
+  response.setHeader("Last-Modified", fileStat.mtime.toUTCString());
+  response.setHeader("Cache-Control", cacheControl);
+  if (isNotModified(request, fileStat, etag)) {
+    response.statusCode = 304;
+    response.end();
     return;
   }
 
@@ -411,10 +544,50 @@ function makeRequestHandler(
   publicGateway = true,
   instanceRegistry?: ChartServiceInstanceRegistry,
   accounts = new AdminAccountStore(path.join(path.dirname(config.instancesPath), "accounts.sqlite")),
+  monitorCompiler = new MonitorChartCompiler({
+    rendererPath: config.monitorRendererPath,
+    cachePath: config.monitorCachePath,
+    maxCacheBytes: config.monitorCacheMaxBytes,
+  }),
+  roomMonitor = new PmpRoomMonitor({
+    baseUrl: config.pmpBaseUrl,
+    snapshotPath: config.pmpRoomsSnapshotPath,
+    eventsPath: config.pmpEventsPath,
+    token: config.pmpMonitorToken,
+    enabled: config.pmpMonitorEnabled,
+  }),
 ) {
-  const fallbackPrivateRecords = new PrivateRecordStore(config.privateRecordsDatabasePath, config.privateRecordsPath);
+  // Opened only when no instance registry is supplied (embedded and test use), so a
+  // normal start does not hold an extra unused SQLite connection.
+  let fallbackPrivateRecords: PrivateRecordStore | null = null;
+  const fallbackRecords = (): PrivateRecordStore => (fallbackPrivateRecords ??= new PrivateRecordStore(config.privateRecordsDatabasePath, config.privateRecordsPath));
   const privateRecordVerificationKey = loadPrivateRecordVerificationKey(config);
+  const recordDecoderPlugin = loadRecordDecoderPlugin(config.privateRecordDecoderPluginPath);
   const viewerResolver = new PhiraViewerResolver(config.upstreamBaseUrl);
+  const pmpAdmin = new PmpAdminClient(config.pmpBaseUrl, config.pmpAdminToken);
+  const profileCache = new Map<number, { name: string; avatar: string | null; until: number }>();
+
+  /** Chart storage of the instance named in a preview URL, without trusting a query. */
+  const monitorTarget = (instanceId: string): { chartsPath: string; charts: PrivateChartStore } | null => {
+    if (instanceRegistry) {
+      if (!instanceRegistry.get(instanceId)) return null;
+      const runtime = instanceRegistry.runtime(instanceId);
+      return { chartsPath: runtime.definition.chartsPath, charts: runtime.charts };
+    }
+    return instanceId === DEFAULT_INSTANCE_ID ? { chartsPath: config.privateChartsPath, charts: fallbackPrivateCharts } : null;
+  };
+
+  /**
+   * Which instance owns a chart, so a room can be attributed to an instance without
+   * trusting anything the room itself reports. Rooms carry only a chart id.
+   */
+  const instanceForChart = (chartId: number | null): string | null => {
+    if (chartId === null || !instanceRegistry) return null;
+    for (const item of instanceRegistry.list()) {
+      if (instanceRegistry.runtime(item.id).charts.get(chartId)) return item.id;
+    }
+    return null;
+  };
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     let adminRequest = false;
@@ -423,7 +596,21 @@ function makeRequestHandler(
       const method = request.method || "UNKNOWN";
       const isAdminApi = requestUrl.pathname === "/api/admin" || requestUrl.pathname.startsWith("/api/admin/");
       const isAdminPage = method === "GET" && requestUrl.pathname === "/admin";
+      const isHomepage =
+        publicGateway &&
+        method === "GET" &&
+        requestUrl.pathname === "/" &&
+        (hostMatches(request.headers.host, HOMEPAGE_HOST) ||
+          hostMatches(request.headers["x-forwarded-host"], HOMEPAGE_HOST)) &&
+        String(request.headers.accept || "").includes("text/html");
       adminRequest = isAdminApi;
+      if (isHomepage) {
+        response.setHeader("X-Frame-Options", "DENY");
+        response.setHeader("Referrer-Policy", "no-referrer");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        html(response, homepageUi());
+        return;
+      }
       if (isAdminPage) {
         response.setHeader("X-Frame-Options", "DENY");
         response.setHeader("Referrer-Policy", "no-referrer");
@@ -467,7 +654,11 @@ function makeRequestHandler(
       }
       // Authenticate before selecting/reading any tenant runtime. IDs supplied by the
       // browser never grant ownership, including omitted/default instance parameters.
-      const owns = (id: string): boolean => Boolean(identity && (hasAdminPermission(identity.user, "manageInstances") || instanceRegistry?.get(id)?.ownerId === identity.user.id));
+      const permitted = (permission: Permission, id: string): boolean => {
+        const item = instanceRegistry?.get(id);
+        return Boolean(identity && item && can(identity.user, permission, item, item.ownerId ? accounts.get(item.ownerId) : null));
+      };
+      const owns = (id: string): boolean => permitted("instance.read", id);
       const instancesEndpoint = requestUrl.pathname === "/api/admin/instances" || requestUrl.pathname.startsWith("/api/admin/instances/");
       const usersEndpoint = requestUrl.pathname === "/api/admin/users" || requestUrl.pathname.startsWith("/api/admin/users/");
       if (isAdminApi && identity) {
@@ -477,23 +668,94 @@ function makeRequestHandler(
           identity = current;
         }
         if (identity.user.approvalStatus !== "approved") throw new AdminError(403, "注册申请尚未通过审核，请在申请状态页查看进度");
+        const docMatch = /^\/api\/admin\/docs\/(user|api|readme)$/.exec(requestUrl.pathname);
+        if (docMatch && method === "GET") {
+          const documentFile = path.resolve(process.cwd(), DOC_FILES[docMatch[1]]);
+          try {
+            json(response, { id: docMatch[1], content: fs.readFileSync(documentFile, "utf8") });
+          } catch {
+            json(response, { error: "document not found" }, 404);
+          }
+          return;
+        }
+        const pdfMatch = /^\/api\/admin\/docs\/(user|api|readme)\/pdf$/.exec(requestUrl.pathname);
+        if (pdfMatch && method === "GET") {
+          const documentId = pdfMatch[1];
+          const documentFile = path.resolve(process.cwd(), DOC_FILES[documentId]);
+          try {
+            const markdown = fs.readFileSync(documentFile, "utf8");
+            const pdf = await renderPdfFromHtml(documentPdfHtml({ title: DOC_PDF_TITLES[documentId], source: markdown }));
+            const filename = DOC_PDF_FILENAMES[documentId];
+            response.statusCode = 200;
+            response.setHeader("Content-Type", "application/pdf");
+            response.setHeader("Cache-Control", "no-store");
+            response.setHeader("X-Content-Type-Options", "nosniff");
+            response.setHeader("Content-Length", pdf.length);
+            response.setHeader("Content-Disposition", `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+            response.end(pdf);
+          } catch (error) {
+            if (!response.headersSent) {
+              json(response, { ok: false, error: error instanceof Error ? error.message : "PDF generation failed" }, 500);
+            } else {
+              response.destroy();
+            }
+          }
+          return;
+        }
+        if (requestUrl.pathname === "/api/admin/permission-catalog" && method === "GET") { json(response, { levels: LEVELS, permissions: PERMISSIONS }); return; }
+        if (requestUrl.pathname === "/api/admin/audit" && method === "GET") {
+          const cursor = Number(requestUrl.searchParams.get("before") || Number.MAX_SAFE_INTEGER);
+          if (!Number.isSafeInteger(cursor) || cursor <= 0) throw new AdminError(422, "审计分页参数不正确");
+          json(response, accounts.auditPage(identity.user, (id, owner) => (instanceRegistry?.get(id)?.ownerId ?? null) === owner && permitted("audit.read", id), cursor)); return;
+        }
         if (usersEndpoint) {
-          if (!hasAdminPermission(identity.user, "reviewUsers")) throw new AdminError(403, "需要注册审核权限");
+          if (!can(identity.user, "user.read")) throw new AdminError(403, "用户管理仅开放给管理员和超级管理员");
           const reviewMatch = /^\/api\/admin\/users\/(\d+)\/review$/.exec(requestUrl.pathname);
           const permissionMatch = /^\/api\/admin\/users\/(\d+)\/permissions$/.exec(requestUrl.pathname);
           const historyMatch = /^\/api\/admin\/users\/(\d+)\/history$/.exec(requestUrl.pathname);
           if (method === "POST" && reviewMatch) { json(response, accounts.reviewUser(Number(reviewMatch[1]), JSON.parse(body.data.toString("utf8")), identity.user)); return; }
-          if (method === "PATCH" && permissionMatch) { json(response, accounts.setPermissions(Number(permissionMatch[1]), JSON.parse(body.data.toString("utf8")), identity.user)); return; }
-          if (method === "GET" && historyMatch) { json(response, accounts.history(Number(historyMatch[1]))); return; }
+          if (method === "PATCH" && permissionMatch) {
+            if (identity.user.role !== "admin") throw new AdminError(403, "只有超级管理员可以调整权限");
+            const input = JSON.parse(body.data.toString("utf8"));
+            const ids = [...(Array.isArray(input?.assignedInstances) ? input.assignedInstances : []), ...(Array.isArray(input?.grants) ? input.grants.flatMap((g: { instanceIds?: unknown }) => Array.isArray(g?.instanceIds) ? g.instanceIds : []) : [])];
+            if (ids.some(id => typeof id !== "string" || !instanceRegistry?.get(id))) throw new AdminError(422, "授权列表包含不存在的实例");
+            json(response, accounts.setPermissions(Number(permissionMatch[1]), input, identity.user)); return;
+          }
+          if (method === "GET" && historyMatch) {
+            if (!can(identity.user, "application.read")) throw new AdminError(403, "无权查看申请记录");
+            const target = accounts.get(Number(historyMatch[1]));
+            if (!target || !canManageAccount(identity.user, target)) throw new AdminError(403, "无权查看此账号的申请记录");
+            json(response, accounts.history(Number(historyMatch[1]))); return;
+          }
+          const logoutMatch = /^\/api\/admin\/users\/(\d+)\/logout$/.exec(requestUrl.pathname);
+          if (method === "POST" && logoutMatch) { accounts.forceLogout(Number(logoutMatch[1]), identity.user, JSON.parse(body.data.toString("utf8")).reason); json(response, { ok: true }); return; }
           const match = /^\/api\/admin\/users\/(\d+)$/.exec(requestUrl.pathname);
           if (method === "GET" && requestUrl.pathname === "/api/admin/users") {
-            json(response, accounts.list().map(user => ({ ...user, instanceCount: instanceRegistry?.list().filter(i => i.ownerId === user.id).length || 0 }))); return;
+            json(response, accounts.list().filter(user => canManageAccount(identity!.user, user) || user.id === identity!.user.id).map(user => {
+              const { application, applicationRevision, reviewNote, reviewedBy, reviewedAt, grants, assignedInstances, ...basic } = user;
+              return { ...basic, ...(can(identity!.user, "application.read") ? { application, applicationRevision, reviewNote, reviewedBy, reviewedAt } : {}), ...(identity!.user.role === "admin" ? { grants, assignedInstances } : {}), instanceCount: instanceRegistry?.list().filter(i => i.ownerId === user.id).length || 0 };
+            })); return;
           }
           if (method === "PATCH" && match) { json(response, accounts.updateUser(Number(match[1]), JSON.parse(body.data.toString("utf8")), identity.user)); return; }
+          if (method === "DELETE" && match) {
+            if (request.headers["x-admin-confirm"] !== "delete") throw new AdminError(422, "删除账号需要明确确认");
+            let reason = "";
+            try { reason = decodeURIComponent(String(request.headers["x-admin-reason"] || "")); }
+            catch { throw new AdminError(422, "操作原因格式错误"); }
+            const userId = Number(match[1]);
+            const ownedInstances = instanceRegistry?.list().filter(item => item.ownerId === userId).map(item => item.id) || [];
+            const deleted = accounts.deleteUser(userId, identity.user, reason, ownedInstances);
+            const releasedInstances = instanceRegistry?.releaseOwner(userId) || [];
+            json(response, { ok: true, id: deleted.id, username: deleted.username, instancesPreserved: releasedInstances }); return;
+          }
           throw new AdminError(404, "用户接口不存在");
         }
         const target = instancesEndpoint ? requestUrl.pathname.split("/")[4] : instanceIdFromQuery(requestUrl.searchParams.get("instance"));
-        if (target && !owns(target)) throw new AdminError(403, "无权管理此实例");
+        // Rooms are global, not instance-scoped: the request carries no instance, so falling
+        // back to the default one would reject members who only collaborate on their own.
+        // Their visibility filter is applied by the monitor routes themselves.
+        const globalRoute = /^\/api\/admin\/(?:monitor\/)?rooms(\/|$)/.test(requestUrl.pathname);
+        if (!globalRoute && target && !owns(target)) throw new AdminError(403, "无权查看此实例");
       }
       const publicChartId = !isAdminApi ? method === "POST" && requestUrl.pathname === "/play/upload"
         ? privateUploadChartId(body.data)
@@ -513,7 +775,7 @@ function makeRequestHandler(
             tokenCapturePath: config.privateTokenCapturePath,
             created: "",
             updated: "",
-          }, charts: fallbackPrivateCharts, records: fallbackPrivateRecords };
+          }, charts: fallbackPrivateCharts, records: fallbackRecords() };
       const privateCharts = runtime.charts;
       const privateRecords = runtime.records;
       const privateTokenCapturePath = runtime.definition.tokenCapturePath;
@@ -548,12 +810,262 @@ function makeRequestHandler(
         if (!identity) throw new AdminError(401, "请先登录");
         const isSuper = identity.user.role === "admin";
         const adminBaseUrl = `https://${request.headers.host || "localhost"}`;
-        const safeInstance = (item: import("./instances").ChartServiceInstanceDefinition) => ({ id: item.id, name: item.name, hosts: isSuper ? item.hosts : [], enabled: item.enabled, visibility: item.visibility ?? null, listingEnabled: config.privateChartListing, ownerId: item.ownerId ?? null, created: item.created, updated: item.updated });
+        const safeInstance = (item: import("./instances").ChartServiceInstanceDefinition) => ({ id: item.id, name: item.name, hosts: isSuper ? item.hosts : [], enabled: item.enabled, visibility: item.visibility ?? null, capabilities: instanceCapabilities(identity!.user, item, item.ownerId ? accounts.get(item.ownerId) : null), listingEnabled: config.privateChartListing, ownerId: item.ownerId ?? null, created: item.created, updated: item.updated });
+        const targetId = instancesEndpoint ? requestUrl.pathname.split("/")[4] : runtime.definition.id;
+        const route = requestUrl.pathname, write = !["GET", "HEAD"].includes(method);
+        const parsedInput = write && !String(request.headers["content-type"]).startsWith("multipart/form-data") ? JSON.parse(body.data.toString("utf8") || "{}") : {};
+        if (!parsedInput || typeof parsedInput !== "object" || Array.isArray(parsedInput)) throw new AdminError(422, "请求格式错误");
+        const requirePermission = (p: Permission) => { if (!permitted(p, targetId)) throw new AdminError(403, "缺少权限：" + PERMISSIONS.find(item => item[0] === p)?.[1]); };
+        const operations: Permission[] = [];
+        if (route.startsWith("/api/admin/download/")) operations.push("chart.download");
+        else if (route === "/api/admin/charts") operations.push(write ? "chart.upload" : "chart.read");
+        else if (route === "/api/admin/charts/batch-delete") operations.push("chart.purge");
+        else if (route === "/api/admin/charts/batch-tags") operations.push("chart.tags");
+        else if (/^\/api\/admin\/charts\/-?\d+$/.test(route)) {
+          if (method === "DELETE") operations.push("chart.delete");
+          else if (method === "PATCH" || method === "PUT") {
+            if (!Object.keys(parsedInput).length) throw new AdminError(422, "请至少指定一个要修改的谱面字段");
+            if (Object.keys(parsedInput).some(k => !["name", "level", "difficulty", "charter", "composer", "illustrator", "description", "tags", "listed"].includes(k))) throw new AdminError(422, "谱面修改字段不支持");
+            if (Object.keys(parsedInput).some(k => !["listed", "tags"].includes(k))) operations.push("chart.edit");
+            if (parsedInput.tags !== undefined) operations.push("chart.tags");
+            if (parsedInput.listed !== undefined) { if (typeof parsedInput.listed !== "boolean") throw new AdminError(422, "上架状态必须是布尔值"); operations.push(parsedInput.listed ? "chart.publish" : "chart.hide"); }
+          }
+        } else if (route === "/api/admin/records") operations.push(write ? "record.create" : "record.read");
+        else if (route.startsWith("/api/admin/records/")) operations.push("record.delete");
+        else if (route.startsWith("/api/admin/leaderboard/")) operations.push("record.read");
+        else if (instancesEndpoint && targetId) {
+          if (method === "DELETE") operations.push("instance.delete");
+          else if (write) {
+            if (!Object.keys(parsedInput).length) throw new AdminError(422, "请至少指定一个要修改的实例字段");
+            if (Object.keys(parsedInput).some(k => !["name", "hosts", "enabled", "visibility"].includes(k))) throw new AdminError(422, "实例修改字段不支持");
+            if (parsedInput.name !== undefined) operations.push("instance.rename");
+            if (parsedInput.visibility !== undefined) operations.push("instance.visibility");
+            if (parsedInput.enabled !== undefined) { if (typeof parsedInput.enabled !== "boolean") throw new AdminError(422, "实例启用状态格式错误"); operations.push(parsedInput.enabled ? "instance.enable" : "instance.disable"); }
+          }
+        }
+        operations.forEach(requirePermission);
+
+        // PMP+ managed-room operations are deliberately proxied by the Gateway. The
+        // browser is authenticated with its normal account session and never sees the
+        // PMP x-admin-token. Senior members and managers may manage definitions they
+        // created; the super administrator may manage every definition.
+        const managedRoot = route === "/api/admin/rooms" ? "/admin/rooms"
+          : route === "/api/admin/rooms/hosted" ? "/admin/rooms/hosted"
+          : route === "/api/admin/rooms/precreate" ? "/admin/rooms/precreate"
+          : null;
+        const managedMatch = /^\/api\/admin\/rooms\/([A-Za-z0-9_-]{1,64})\/(hosted|max-users|disband|chat|chart-pool)$/.exec(route);
+        if (managedRoot || managedMatch) {
+          const canManageRooms = identity.user.role === "admin"
+            || identity.user.level === "senior"
+            || identity.user.level === "manager";
+          if (!canManageRooms) throw new AdminError(403, "只有高级成员、管理员或超级管理员可以管理房间");
+          let upstream = managedRoot;
+          if (managedMatch) {
+            const suffix = ({ "max-users": "max_users", "chart-pool": "chart_pool" } as Record<string, string>)[managedMatch[2]] || managedMatch[2];
+            upstream = `/admin/rooms/${encodeURIComponent(managedMatch[1])}/${suffix}`;
+          }
+          const allowed = upstream === "/admin/rooms" ? method === "GET"
+            : upstream === "/admin/rooms/hosted" || upstream === "/admin/rooms/precreate" ? method === "POST"
+            : upstream?.endsWith("/hosted") ? method === "GET" || method === "PATCH"
+            : upstream?.endsWith("/chart_pool") ? method === "GET" || method === "PUT"
+            : method === "POST";
+          if (!allowed) throw new AdminError(405, "房间管理方法不支持");
+          let reason = "";
+          if (write) {
+            try { reason = decodeURIComponent(String(request.headers["x-admin-reason"] || "")); }
+            catch { throw new AdminError(422, "操作原因格式错误"); }
+            reason = accounts.reason(reason);
+          }
+          const roomId = managedMatch?.[1] || String((parsedInput as Record<string, unknown>).roomId || "");
+          const accountOwnerId = identity.user.id > 0 ? identity.user.id : null;
+          let auditOwner = managedRoot === "/admin/rooms/hosted" || managedRoot === "/admin/rooms/precreate"
+            ? accountOwnerId
+            : null;
+          try {
+            if (managedMatch) {
+              const existing = (await pmpAdmin.list()).rooms.find(room => room.roomid === managedMatch[1]);
+              if (!existing || (identity.user.role !== "admin" && existing.owner_id !== identity.user.id)) {
+                throw new AdminError(404, "未找到房间");
+              }
+              auditOwner = existing.owner_id;
+            }
+            const upstreamBody = write ? { ...parsedInput } : undefined;
+            if (upstreamBody && (managedRoot === "/admin/rooms/hosted" || managedRoot === "/admin/rooms/precreate")) {
+              // Never trust an owner supplied by the browser.
+              upstreamBody.ownerId = accountOwnerId;
+            }
+            let result = await pmpAdmin.request(upstream!, method, upstreamBody);
+            if (upstream === "/admin/rooms" && method === "GET" && result && typeof result === "object") {
+              const object = result as { rooms?: Array<Record<string, unknown>>; total_rooms?: number };
+              const visibleRooms = (object.rooms || []).filter(room => identity.user.role === "admin" || room.owner_id === identity.user.id);
+              const rooms = visibleRooms.map(room => {
+                const chart = room.chart && typeof room.chart === "object" ? room.chart as Record<string, unknown> : null;
+                const chartId = typeof chart?.id === "number" ? chart.id : null;
+                return { ...room, instanceId: instanceForChart(chartId) };
+              });
+              result = { ...object, total_rooms: rooms.length, rooms };
+            }
+            if (write) accounts.audit(identity.user.id, null, auditOwner, `room.${managedMatch?.[2] || route.split("/").at(-1)}`, roomId, reason, {}, result);
+            const created = Boolean((result as Record<string, unknown> | null)?.created);
+            json(response, result, created ? 201 : 200);
+          } catch (error) {
+            if (write) accounts.audit(identity.user.id, null, auditOwner, `room.${managedMatch?.[2] || route.split("/").at(-1)}`, roomId, reason, {}, { error: error instanceof Error ? error.message : String(error) }, "failed");
+            if (error instanceof AdminError) throw error;
+            if (error instanceof PmpAdminError) throw new AdminError(error.statusCode >= 500 ? 502 : error.statusCode, error.message);
+            throw error;
+          }
+          return;
+        }
+
+        // Chart preview: the vendored phira-web-monitor renderer (MIT) re-uses the very
+        // parser the upstream monitor server uses, so previews cannot disagree with what
+        // players see. Its WASM player fetches the payload itself and therefore cannot
+        // send an admin token header, which is why these routes authenticate through the
+        // same-origin admin session cookie like any other browser request. The instance is
+        // part of the path because the player appends "/chart/<id>" to the base it is given.
+        if (route === "/api/admin/monitor/status" && method === "GET") {
+          json(response, {
+            available: monitorCompiler.available,
+            buildCommand: "npm run build:renderer",
+            version: monitorCompiler.assetVersion(),
+            pkg: listMonitorAssets(monitorCompiler.pkgPath),
+            respack: listMonitorAssets(monitorCompiler.respackPath),
+            cache: monitorCompiler.stats(),
+          });
+          return;
+        }
+        // The optional path segment is a cache key for the immutable renderer build; the
+        // file served always comes from the current vendored copy.
+        const monitorAssetMatch = /^\/api\/admin\/monitor\/(pkg|respack)\/(?:[a-f0-9]{6,32}\/)?([A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(route);
+        if (monitorAssetMatch && method === "GET") {
+          const directory = monitorAssetMatch[1] === "pkg" ? monitorCompiler.pkgPath : monitorCompiler.respackPath;
+          const asset = monitorAssetPath(directory, monitorAssetMatch[2]);
+          if (!asset || !fs.existsSync(asset)) throw new AdminError(404, "渲染器资源不存在");
+          sendFile(request, response, asset, contentTypeForAsset(monitorAssetMatch[2]), "private, max-age=3600");
+          return;
+        }
+        const roomDetailMatch = /^\/api\/admin\/monitor\/rooms\/([A-Za-z0-9_-]{1,64})$/.exec(route);
+        if ((route === "/api/admin/monitor/rooms" || roomDetailMatch) && method === "GET") {
+          // Rooms are global on the PMP side, so the filter is ownership: an unrestricted
+          // view needs an `all` scope grant (or the super administrator), otherwise only
+          // rooms whose chart lives in an instance the actor may monitor are returned.
+          const unrestricted = canViewAllRooms(identity.user);
+          const canViewRooms = unrestricted || Boolean(instanceRegistry?.list().some(item => permitted("monitor.view", item.id)));
+          if (!canViewRooms) throw new AdminError(403, "缺少权限：查看房间");
+          // The UI's refresh button asks for a fresh snapshot; without it the list is fed by
+          // events plus the monitor's own periodic refresh.
+          if (requestUrl.searchParams.get("refresh") === "1") await roomMonitor.refreshSnapshot();
+          const visible = roomMonitor.list().flatMap((room) => {
+            const instanceId = instanceForChart(room.chartId);
+            if (!unrestricted && (instanceId === null || !permitted("monitor.view", instanceId))) return [];
+            return [{ ...room, instanceId }];
+          });
+          if (roomDetailMatch) {
+            const room = visible.find(item => item.id === roomDetailMatch[1]);
+            // Invisible rooms are reported as missing rather than forbidden: a member must
+            // not be able to probe which room ids exist.
+            if (!room) throw new AdminError(404, "房间不存在");
+            json(response, room);
+            return;
+          }
+          json(response, { status: roomMonitor.status(), unrestricted, rooms: visible });
+          return;
+        }
+        const monitorChartMatch = /^\/api\/admin\/monitor\/i\/([a-z0-9][a-z0-9_-]{0,47})\/chart\/(-?\d+)$/.exec(route);
+        if (monitorChartMatch && method === "GET") {
+          const instanceId = monitorChartMatch[1];
+          if (!permitted("chart.read", instanceId)) throw new AdminError(403, "缺少权限：谱面预览");
+          const chartId = Number(monitorChartMatch[2]);
+          const target = monitorTarget(instanceId);
+          if (!target || !target.charts.get(chartId)) throw new AdminError(404, "谱面不存在");
+          const packagePath = path.join(target.chartsPath, String(chartId), "chart-package.pez");
+          if (!fs.existsSync(packagePath)) throw new AdminError(404, "谱面包不存在");
+          if (!monitorCompiler.available) throw new AdminError(503, "谱面渲染器尚未构建，请先运行 npm run build:renderer");
+          let compiled: Awaited<ReturnType<typeof monitorCompiler.payload>>;
+          try {
+            compiled = await monitorCompiler.payload(chartId, packagePath);
+          } catch (error) {
+            throw new AdminError(500, "谱面编译失败：" + (error instanceof Error ? error.message : String(error)));
+          }
+          // The payload is immutable per revision, so a validator keeps repeat previews
+          // cheap while still picking up a re-uploaded package.
+          sendFile(request, response, compiled.filePath, "application/octet-stream", "private, max-age=0, must-revalidate");
+          return;
+        }
+        // Summary of an already compiled payload: duration and note counts for the
+        // preview controls. It never triggers a compilation of its own.
+        const monitorMetaMatch = /^\/api\/admin\/monitor\/i\/([a-z0-9][a-z0-9_-]{0,47})\/meta\/(-?\d+)$/.exec(route);
+        if (monitorMetaMatch && method === "GET") {
+          const instanceId = monitorMetaMatch[1];
+          if (!permitted("chart.read", instanceId)) throw new AdminError(403, "缺少权限：谱面预览");
+          const chartId = Number(monitorMetaMatch[2]);
+          const target = monitorTarget(instanceId);
+          if (!target || !target.charts.get(chartId)) throw new AdminError(404, "谱面不存在");
+          const packagePath = path.join(target.chartsPath, String(chartId), "chart-package.pez");
+          const meta = monitorCompiler.metaFor(chartId, packagePath);
+          if (!meta) throw new AdminError(404, "谱面尚未编译");
+          // The revision makes the illustration URL immutable, so it can be cached hard.
+          json(response, { ...meta, revision: monitorCompiler.revisionFor(chartId, packagePath) });
+          return;
+        }
+        // The chart illustration, drawn behind the playfield exactly as the reference
+        // player does (see prpr's draw_background: cover-cropped, blurred, dimmed).
+        const monitorBackgroundMatch = /^\/api\/admin\/monitor\/i\/([a-z0-9][a-z0-9_-]{0,47})\/background\/(-?\d+)$/.exec(route);
+        if (monitorBackgroundMatch && method === "GET") {
+          const instanceId = monitorBackgroundMatch[1];
+          if (!permitted("chart.read", instanceId)) throw new AdminError(403, "缺少权限：谱面预览");
+          const chartId = Number(monitorBackgroundMatch[2]);
+          const target = monitorTarget(instanceId);
+          if (!target || !target.charts.get(chartId)) throw new AdminError(404, "谱面不存在");
+          const background = monitorCompiler.backgroundFor(chartId, path.join(target.chartsPath, String(chartId), "chart-package.pez"));
+          if (!background) throw new AdminError(404, "该谱面没有可用作背景的图片");
+          sendFile(request, response, background.filePath, background.contentType, "private, max-age=3600");
+          return;
+        }
+        if (write) {
+          let reason = "";
+          try { reason = decodeURIComponent(String(request.headers["x-admin-reason"] || "")); } catch { throw new AdminError(422, "操作原因格式错误"); }
+          const target = instanceRegistry?.get(targetId);
+          const highRisk = operations.some(p => ["高", "极高"].includes(PERMISSIONS.find(item => item[0] === p)![2]));
+          if (target && target.ownerId !== identity.user.id && highRisk) reason = accounts.reason(reason);
+          if (operations.includes("instance.delete") && request.headers["x-admin-confirm"] !== targetId || operations.includes("chart.purge") && request.headers["x-admin-confirm"] !== "delete") throw new AdminError(422, "请确认删除范围后再提交");
+          const auditId = targetId || String(parsedInput.id || "");
+          const initial = instanceRegistry?.get(auditId) ? instanceRegistry.runtime(auditId) : null;
+          const initialChartIds = new Set(initial?.charts.list().map(c => c.id));
+          // Record ids are assigned in increasing order, so the highest id before the
+          // request identifies everything the request creates without reading the table.
+          const initialRecordId = initial ? initial.records.maxRecordId() : 0;
+          const snapshot = () => {
+            const item = instanceRegistry?.get(auditId); if (!item) return null;
+            const rt = instanceRegistry!.runtime(auditId), charts = rt.charts.list();
+            const chartMatch = /^\/api\/admin\/charts\/(-?\d+)$/.exec(route), recordMatch = /^\/api\/admin\/records\/(-?\d+)$/.exec(route);
+            const relevantCharts = chartMatch ? charts.filter(c => c.id === Number(chartMatch[1])) : route === "/api/admin/charts" && method === "POST" ? charts.filter(c => !initialChartIds.has(c.id)) : charts;
+            // Audit details stay bounded: totals come from COUNT and at most 501 rows are
+            // read, which keeps detailsTruncated accurate without a full table scan.
+            const single = recordMatch ? rt.records.recordById(Number(recordMatch[1])) : null;
+            const relevantRecords = recordMatch ? (single ? [single] : [])
+              : route === "/api/admin/records" && method === "POST" ? rt.records.recordsAfter(initialRecordId, 501)
+              : chartMatch ? rt.records.recentRecords({ chart: Number(chartMatch[1]) }, 501)
+              : rt.records.recentRecords({}, 501);
+            return { instance: { id: item.id, name: item.name, enabled: item.enabled, visibility: item.visibility, hosts: item.hosts }, chartCount: charts.length, recordCount: rt.records.countRecords(),
+              detailsTruncated: relevantCharts.length > 500 || relevantRecords.length > 500,
+              charts: relevantCharts.slice(0, 500).map(c => ({ id: c.id, name: c.name, level: c.level, difficulty: c.difficulty, charter: c.charter, composer: c.composer, illustrator: c.illustrator, description: c.description, tags: c.tags, listed: c.listed })), records: relevantRecords.slice(0, 500).map(r => ({ id: r.id, chart: r.chart, player: r.player, score: r.score, accuracy: r.accuracy })) };
+          };
+          const before = snapshot(), actor = identity.user.id, owner = target?.ownerId ?? actor;
+          const end = response.end.bind(response);
+          response.end = ((...args: Parameters<typeof response.end>) => {
+            response.end = end;
+            accounts.audit(actor, auditId, owner, method + " " + route, route, reason, before, snapshot(), response.statusCode < 400 ? "success" : "failed");
+            return end(...args);
+          }) as typeof response.end;
+        }
         const downloadMatch = /^\/api\/admin\/download\/(-?\d+)$/.exec(requestUrl.pathname);
         if (downloadMatch && method === "GET") {
           const resource = privateResourceForPath(`/private-charts/${downloadMatch[1]}.pez`, runtime.definition.chartsPath, privateCharts);
           if (!resource) throw new AdminError(404, "谱面文件不存在");
-          sendFile(request, response, resource.filePath, resource.contentType); return;
+          accounts.audit(identity.user.id, runtime.definition.id, runtime.definition.ownerId ?? null, "chart.download", downloadMatch[1], "", {}, { chartId: Number(downloadMatch[1]) });
+          // An authenticated download must not be stored by shared caches.
+          sendFile(request, response, resource.filePath, resource.contentType, "private, no-store"); return;
         }
         if (method === "GET" && requestUrl.pathname === "/api/admin/instances") {
           json(response, instanceRegistry
@@ -562,7 +1074,7 @@ function makeRequestHandler(
                 return {
                   ...safeInstance(item),
                   chartCount: itemRuntime.charts.list().length,
-                  recordCount: itemRuntime.records.adminRecords().length,
+                  recordCount: itemRuntime.records.countRecords(),
                 };
               })
             : []);
@@ -601,10 +1113,11 @@ function makeRequestHandler(
         }
         if (instanceAdminMatch && instanceRegistry && method === "DELETE") {
           try {
-            if (!instanceRegistry.delete(instanceAdminMatch[1])) {
+            if (!await instanceRegistry.delete(instanceAdminMatch[1])) {
               json(response, { error: "chart service instance not found" }, 404);
               return;
             }
+            accounts.removeInstanceGrants(instanceAdminMatch[1]);
             json(response, { ok: true, id: instanceAdminMatch[1] });
           } catch (error) {
             json(response, { error: error instanceof Error ? error.message : String(error) }, 422);
@@ -614,12 +1127,12 @@ function makeRequestHandler(
         if (method === "GET" && requestUrl.pathname === "/api/admin/dashboard") {
           json(response, {
             instance: safeInstance(runtime.definition),
-            charts: privateCharts.list().map((chart) => ({
+            charts: permitted("chart.read", runtime.definition.id) ? privateCharts.list().map((chart) => ({
               ...chart,
               ...getPrivateChartById(chart.id, adminBaseUrl, privateCharts),
-            })),
-            records: privateRecords.adminRecords(),
-            players: privateRecords.adminPlayers(),
+            })) : [],
+            records: permitted("record.read", runtime.definition.id) ? privateRecords.adminRecords() : [],
+            players: permitted("record.read", runtime.definition.id) ? privateRecords.adminPlayers() : [],
           });
           return;
         }
@@ -645,7 +1158,7 @@ function makeRequestHandler(
             .filter((chart) => tags.length > 0 && tags.some((tag) => chart.tags.some((item) => item.toLocaleLowerCase() === tag)))
             .map((chart) => chart.id);
           const ids = parsed.all === true ? privateCharts.list().map((chart) => chart.id) : [...new Set([...selectedIds, ...tagIds])];
-          const deletedIds = privateCharts.deleteMany(ids);
+          const deletedIds = await privateCharts.deleteMany(ids);
           const recordsDeleted = deletedIds.reduce((total, id) => total + privateRecords.deleteChartRecords(id), 0);
           json(response, { ok: true, deletedIds, recordsDeleted });
           return;
@@ -683,7 +1196,7 @@ function makeRequestHandler(
         }
         if (chartAdminMatch && method === "DELETE") {
           const id = Number(chartAdminMatch[1]);
-          if (!privateCharts.delete(id)) {
+          if (!await privateCharts.delete(id)) {
             json(response, { error: "private chart not found" }, 404);
             return;
           }
@@ -725,6 +1238,7 @@ function makeRequestHandler(
           if (!packageFile) throw new Error("chart package is required");
           const collection = privateCharts.importCollection(packageFile);
           if (collection) {
+            if (!permitted("chart.publish", runtime.definition.id)) for (const item of collection.created) { privateCharts.update(item.id, { listed: false }); item.listed = false; }
             json(response, {
               collection: true,
               created: collection.created.map((item) => ({ ...item, ...getPrivateChartById(item.id, adminBaseUrl, privateCharts) })),
@@ -735,6 +1249,7 @@ function makeRequestHandler(
           const requestedChartId = textField("id");
           if (requestedChartId && instanceRegistry?.list().some(item => item.id !== runtime.definition.id && instanceRegistry.runtime(item.id).charts.get(Number(requestedChartId)))) throw new AdminError(409, "该谱面 ID 已被其他实例使用，请更换 ID 或留空自动分配");
           const chart = privateCharts.create({
+            listed: permitted("chart.publish", runtime.definition.id),
             id: textField("id") ? Number(textField("id")) : undefined,
             name: textField("name"), level: textField("level"), difficulty: textField("difficulty") ? Number(textField("difficulty")) : 0,
             charter: textField("charter"), composer: textField("composer"), illustrator: textField("illustrator"), description: textField("description"), tags,
@@ -804,19 +1319,29 @@ function makeRequestHandler(
             parsedUpload = null;
           }
           const isRegisteredPrivateChart = uploadChart === PRIVATE_CHART_ID || Boolean(privateCharts.get(uploadChart));
-          if (isRegisteredPrivateChart && !privateRecordVerificationKey) {
-            json(response, { error: "Private score decoder is not configured" }, 503);
+          const decoder = recordDecoderPlugin;
+          if (isRegisteredPrivateChart && (!privateRecordVerificationKey || !decoder)) {
+            // Development/deployment fallback: a checkout without the private key or
+            // decoder plugin must remain runnable. Do not persist unverified data; only
+            // return the legacy-shaped success acknowledgement expected by the client.
+            json(response, privateOpaqueUploadAcknowledgement(), 200);
             return;
           }
-          const preliminary = privateRecordVerificationKey && parsedUpload && typeof parsedUpload === "object" && !Array.isArray(parsedUpload)
+          if (!privateRecordVerificationKey || !decoder) {
+            const upstreamBase = new URL(config.upstreamBaseUrl);
+            if (upstreamBase.protocol !== "https:") throw new Error("UPSTREAM_BASE_URL must use https");
+            await forwardRequest(request, response, new URL(`${requestUrl.pathname}${requestUrl.search}`, upstreamBase), body.data);
+            return;
+          }
+          const preliminary = parsedUpload && typeof parsedUpload === "object" && !Array.isArray(parsedUpload)
             && typeof (parsedUpload as Record<string, unknown>).token === "string"
-            ? decodePhiraRecordToken((parsedUpload as Record<string, unknown>).token as string, { key: privateRecordVerificationKey, expectedChartId: uploadChart })
+            ? decoder.decodePhiraRecordToken((parsedUpload as Record<string, unknown>).token as string, { key: privateRecordVerificationKey, expectedChartId: uploadChart })
             : null;
           const authenticatedUserId = preliminary?.valid
             ? privateRecords.bindAuthorizationToUser(request.headers.authorization, preliminary.record.userId)
             : null;
           const upstreamBase = new URL(config.upstreamBaseUrl);
-          const result = await handlePrivateUpload(parsedUpload, {
+          const result = await decoder!.handlePrivateUpload(parsedUpload, {
             verificationKey: privateRecordVerificationKey || Buffer.alloc(0),
             isRegisteredPrivateChart: async (chartId: number) => chartId === PRIVATE_CHART_ID || Boolean(privateCharts.get(chartId)),
             forwardOriginal: async () => {
@@ -862,7 +1387,16 @@ function makeRequestHandler(
         const userId = Number(userMatch[1]);
         let user = privateRecords.userMetadata(userId);
         if (user) {
-          const profile = await fetchPublicUserProfile(config, userId);
+          const cached = profileCache.get(userId);
+          let profile = cached && cached.until > Date.now() ? cached : null;
+          if (!profile) {
+            const fetched = await fetchPublicUserProfile(config, userId);
+            if (fetched) {
+              if (profileCache.size >= 2000) profileCache.clear();
+              profile = { ...fetched, until: Date.now() + PROFILE_CACHE_MS };
+              profileCache.set(userId, profile);
+            }
+          }
           if (profile) {
             privateRecords.updatePlayerProfile(userId, profile.name, profile.avatar);
             user = privateRecords.userMetadata(userId);
@@ -879,6 +1413,29 @@ function makeRequestHandler(
         if (privateRecords.hasPlayer(playerId)) {
           json(response, privateRecords.playerRecords(playerId));
           return;
+        }
+      }
+
+      // PMP fetches the authoritative score by record id after a player reports
+      // Played. A miss must continue to the official upstream because official
+      // records share the same public route.
+      const privateRecordMatch = /^\/record\/(\d+)$/.exec(requestUrl.pathname);
+      if (method === "GET" && privateRecordMatch) {
+        const recordId = Number(privateRecordMatch[1]);
+        if (Number.isSafeInteger(recordId) && recordId > 0) {
+          const record = instanceRegistry
+            ? instanceRegistry.recordById(recordId, request.headers.host)
+            : privateRecords.recordById(recordId);
+          if (record) {
+            // PMP deserializes these two fields as non-null f32 values. Newly
+            // stored private records have no standard-deviation calculation yet.
+            json(response, {
+              ...record,
+              std: typeof record.std === "number" ? record.std : 0,
+              std_score: typeof record.std_score === "number" ? record.std_score : 0,
+            });
+            return;
+          }
         }
       }
 
@@ -916,10 +1473,10 @@ function makeRequestHandler(
           json(response, { code: "METHOD_NOT_ALLOWED", error: "private chart rating method not allowed" }, 405);
           return;
         }
-        if (method === "GET" && requestUrl.pathname === `/chart/${privateId}`) {
+      if (method === "GET" && requestUrl.pathname === `/chart/${privateId}`) {
           const chart = getPrivateChartById(
             privateId,
-            `https://${request.headers.host || "phira.5wyxi.com"}`,
+            config.publicBaseUrl || `https://${request.headers.host || "phira.5wyxi.com"}`,
             privateCharts,
             privateRecords.ratingSummary(privateId),
           );
@@ -952,7 +1509,7 @@ function makeRequestHandler(
           json(response, { code: "METHOD_NOT_ALLOWED", error: "private resource is read-only" }, 405);
           return;
         }
-        sendFile(request, response, privateResource.filePath, privateResource.contentType);
+        sendFile(request, response, privateResource.filePath, privateResource.contentType, "private, max-age=86400");
         return;
       }
 
@@ -966,7 +1523,7 @@ function makeRequestHandler(
         throw new Error("UPSTREAM_BASE_URL must use https");
       }
       const upstreamUrl = new URL(`${requestUrl.pathname}${requestUrl.search}`, upstreamBase);
-      const listBaseUrl = `https://${request.headers.host || "phira.5wyxi.com"}`;
+      const listBaseUrl = config.publicBaseUrl || `https://${request.headers.host || "phira.5wyxi.com"}`;
       const mergeListing = config.privateChartListing && method === "GET" && isChartListPath(requestUrl.pathname);
       const viewerId = mergeListing && instanceRegistry?.needsViewer() ? await viewerResolver.resolve(request.headers.authorization) : null;
       const listingCharts = mergeListing && instanceRegistry ? { list: () => instanceRegistry.visibleCharts(viewerId, request.headers.host) } : privateCharts;
@@ -1026,6 +1583,21 @@ async function start(): Promise<void> {
   const instanceRegistry = new ChartServiceInstanceRegistry(config);
   const accounts = new AdminAccountStore(path.join(path.dirname(config.instancesPath), "accounts.sqlite"));
   const defaultRuntime = instanceRegistry.defaultRuntime();
+  // One shared pair per process: the two HTTP servers must not each compile charts or open
+  // their own event stream to PMP.
+  const monitorCompiler = new MonitorChartCompiler({
+    rendererPath: config.monitorRendererPath,
+    cachePath: config.monitorCachePath,
+    maxCacheBytes: config.monitorCacheMaxBytes,
+  });
+  const roomMonitor = new PmpRoomMonitor({
+    baseUrl: config.pmpBaseUrl,
+    snapshotPath: config.pmpRoomsSnapshotPath,
+    eventsPath: config.pmpEventsPath,
+    token: config.pmpMonitorToken,
+    enabled: config.pmpMonitorEnabled,
+  });
+  roomMonitor.start();
   const multiplayer = config.multiplayerEnabled
     ? new MultiplayerServer({
         host: config.multiplayerHost,
@@ -1050,10 +1622,10 @@ async function start(): Promise<void> {
 
   const server = https.createServer(
     { cert: fs.readFileSync(config.certPath), key: fs.readFileSync(config.keyPath) },
-    makeRequestHandler(config, logger, defaultRuntime.charts, true, instanceRegistry, accounts),
+    makeRequestHandler(config, logger, defaultRuntime.charts, true, instanceRegistry, accounts, monitorCompiler, roomMonitor),
   );
   const adminServer = http.createServer(
-    makeRequestHandler(config, logger, defaultRuntime.charts, false, instanceRegistry, accounts),
+    makeRequestHandler(config, logger, defaultRuntime.charts, false, instanceRegistry, accounts, monitorCompiler, roomMonitor),
   );
 
   server.on("error", (error) => {
@@ -1070,6 +1642,7 @@ async function start(): Promise<void> {
   });
 
   const shutdown = (): void => {
+    roomMonitor.stop();
     server.close();
     adminServer.close();
     void multiplayer?.close();
@@ -1078,7 +1651,7 @@ async function start(): Promise<void> {
   process.once("SIGTERM", shutdown);
 
   server.listen(config.port, config.host, () => {
-    process.stdout.write(`Phira API Probe listening on https://${config.host}:${config.port}\n`);
+    process.stdout.write(`Phira 本地谱面管理系统正在监听 https://${config.host}:${config.port}\n`);
     process.stdout.write(`Certificate: ${config.certPath}\n`);
     process.stdout.write(`Private key: ${config.keyPath}\n`);
     process.stdout.write(`File logging: ${config.logToFile ? config.logFilePath : "disabled"}\n`);

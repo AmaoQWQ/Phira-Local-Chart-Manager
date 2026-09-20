@@ -1,19 +1,19 @@
-# Phira Private Chart Gateway
+# Phira 本地谱面管理系统
 
-一个独立的 Node.js Gateway，为原版 Phira 客户端提供私有谱面、私有成绩和多人房间服务。
+一个面向原版 Phira 客户端的本地谱面管理系统，提供谱面管理与分发、本地成绩和多人房间服务。
 
 项目与 Phira 客户端/API 有关。
 
 ## 特性
 
 - 透明转发官方 Phira API 请求
-- 提供本地私有 Chart metadata 和谱面资源
+- 提供本地 Chart metadata 和谱面资源
 - 通过管理页面上传 `.pez` 或 `.zip` 谱面包
 - 自动读取 `info.yml`、`info.yaml` 或 `info.txt` 中的谱面信息和谱师信息
 - 自动提取曲绘、音乐和预览音频
-- 私有成绩上传、删除和排行榜查询
-- 私有谱面注入在线列表和搜索结果
-- 两人多人房间和私有谱面选谱
+- 本地成绩上传、删除和排行榜查询
+- 本地谱面注入在线列表和搜索结果
+- 多人房间和本地谱面选谱
 - 支持 Windows、Linux 和 macOS
 
 ## 架构
@@ -25,11 +25,11 @@ Phira 客户端
       v
 Node.js Gateway
    |          |
-   |          +--> 私有 Chart metadata 和本地资源
+   |          +--> 本地 Chart metadata 和本地资源
    |
    +--------------> 官方 Phira API
 
-Phira 客户端 -- TCP:12348 --> 多人房间服务
+Phira 客户端 -- TCP:12356 --> mp-server/PMP+
 ```
 
 普通请求继续转发到官方 API，私有 chart ID 由 Gateway 本地处理。
@@ -72,7 +72,7 @@ npm run build
 npm start
 ```
 
-默认 HTTPS 端口为 443。443 已被占用时，Windows 启动脚本会自动使用 8443。多人房间服务默认监听 TCP 12348。
+默认 HTTPS 端口为 443。443 已被占用时，Windows 启动脚本会自动使用 8443。多人游戏仅由 `mp-server/PMP+` 提供，默认监听 TCP 12356；网关内置多人实现默认关闭，仅保留协议回归测试。
 
 如果没有证书，可以生成本地测试证书：
 
@@ -91,16 +91,22 @@ HOST=0.0.0.0
 PORT=443
 ADMIN_PORT=9000
 UPSTREAM_BASE_URL=https://phira.5wyxi.com
+PUBLIC_BASE_URL=https://your-phira-api.example.com
 PRIVATE_CHARTS_PATH=data/private-charts
 INSTANCE_REGISTRY_PATH=data/instances/instances.json
 PRIVATE_CHART_LISTING=true
 PRIVATE_RECORDS_PATH=data/private-records/records.json
 PRIVATE_RECORDS_DB_PATH=data/private-records/records.sqlite
 PRIVATE_RECORD_VERIFICATION_KEY_PATH=decoder/record-verification-key.bin
+PRIVATE_RECORD_DECODER_PLUGIN=decoder/decoder-dist/private-upload-adapter.js
 ADMIN_TOKEN=your-admin-token
-MULTIPLAYER_ENABLED=true
+MULTIPLAYER_ENABLED=false
 MULTIPLAYER_HOST=0.0.0.0
 MULTIPLAYER_PORT=12348
+PMP_MONITOR_ENABLED=true
+PMP_BASE_URL=http://127.0.0.1:12357
+PMP_ROOMS_SNAPSHOT_PATH=/api/rooms/info
+PMP_EVENTS_PATH=/api/rooms/listen
 TLS_CERT_PATH=certs/server.crt
 TLS_KEY_PATH=certs/server.key
 ```
@@ -131,16 +137,33 @@ http://127.0.0.1:9000/admin
 
 首次使用时，服务器所有者展开登录页的“初始化超级管理员”，输入现有 `ADMIN_TOKEN`，再设置自己的用户名和密码。初始化只允许成功一次，普通注册或抢先注册不会获得管理员权限。之后使用账号密码登录；管理面板账号独立于 Phira 官方账号。
 
-普通用户可以公开提交注册申请，**通过审核后**默认实例配额为 **2**，只能管理自己创建的实例及其中的谱面、成绩。实例归属由服务端设置，配额也由服务端检查（含并发请求）。超级管理员可管理全部实例，在“用户与注册审核”中修改每人的配额（0–10000）、停用/恢复账号。降低配额不会删除已有实例；停用账号会撤销登录会话并禁止登录，数据保留。默认实例和升级前已有实例由超级管理员管理。
+普通用户可以公开提交注册申请，**通过审核后**默认实例配额为 **2**，只能管理自己创建的实例及其中的谱面、成绩。实例归属由服务端设置，配额也由服务端检查（含并发请求）。超级管理员可管理全部实例，在“用户与注册审核”中修改每人的配额（0–10000）、停用/恢复或永久删除账号。降低配额不会删除已有实例；停用账号会撤销登录会话并禁止登录，数据保留。删除账号时，其服务实例和数据会保留并转为服务器所有。默认实例和升级前已有实例由超级管理员管理。
 
 注册时需填写注册原因（10–2000 字）、个人/团体用途、社交平台及账号；团体用途还需填写团体名称，可补充使用人数、作品或介绍。申请状态分为待审核、已通过和已拒绝。待审核或被拒绝用户可登录查看状态、修改密码、补充资料并重新提交，但不能调用实例、谱面、成绩管理接口。拒绝时必须填写原因，申请人可以查看。审核会校验资料版本，申请人修改资料后，审核员必须刷新再审；并发审核只允许一个结果成功保存。
 
-超级管理员可在用户行的“管理权限”中分别授予或收回：
+超级管理员通过 **用户与注册审核 → 等级与权限** 配置五级制度：
 
-- **审核注册申请**：可读取申请资料、通过或拒绝待审核申请，不能审核自己的申请。
-- **管理所有实例**：可管理各用户实例及其中的谱面、成绩；自己的实例创建仍受原配额限制。此权限本身不允许读取其他用户的申请资料。
+| 等级 | 默认职责与范围 |
+| --- | --- |
+| 普通成员 | 管理自己的实例、谱面和私有成绩 |
+| 进阶成员 | 在自己的实例之外，协助维护指定实例的谱面，查看成绩与操作记录 |
+| 高级成员 | 维护指定实例，可创建和管理自己拥有的多人房间；可由超级管理员额外授予启停等操作，不能查看或审核注册 |
+| 管理员 | 查看、审核注册，管理普通/进阶/高级成员的账号与实例，可停用/恢复账号、强制退出、调整实例可见范围与上下架、删除单张谱面 |
+| 超级管理员 | 全平台管理；只有服务器所有者能调整等级、额外授权、配额、域名和永久删除账号 |
 
-被授权账号显示为“授权管理员”，权限立即作用于现有登录会话。只有超级管理员能授予权限、改配额或停用账号，授权人员不能继续提权；域名绑定仍由超级管理员管理。仅可向已审核通过且未停用的普通账号授予权限。申请处理与权限调整记录保存在账号数据库中，可从审核详情查看。升级前已有账号保持已通过状态，不强制重新申请，已有实例和成绩保留。
+所有成员自己的实例管理能力保持不变。升级等级不会自动增加创建配额，默认仍为 2；降配额不删除数据。管理员默认不能管理其他管理员、超级管理员或服务器所有的实例；这些实例如需协作，由超级管理员明确指定范围。管理员不能操作同级或超级管理员账号，也不能转授权限。
+
+26 项可分配操作及风险等级由 `GET /api/admin/permission-catalog` 提供。查看、下载、上传、编辑信息、标签、上架、下架、单张删除、批量清空、成绩查看/录入/删除、实例改名/可见范围/启停/删除和用户管理均分别校验。操作其他实例须同时有 `instance.read` 及相应操作权限；授予查看不自动授予其他操作。上传者没有上架权限时，新上传的谱面和合集条目自动保持下架。
+
+额外规则支持“允许/禁止”、指定实例或全部适用对象，以及可选到期时间。个人实例基础能力保留；在其他范围，禁止规则优先于默认和额外允许。到期、撤权、降级均由每次请求的服务端检查执行。修改权限需要资料版本号和原因，避免两个编辑窗口相互覆盖；等级变更时面板清空旧的协作范围和额外授权，需保留的规则由超级管理员重新明确添加。删除实例会移除指向该实例的协作授权，重建同名实例不会继承旧授权。
+
+**注册申请资料、社交账号、申请历史以及通过/拒绝权限只向管理员和超级管理员开放，普通、进阶、高级成员不能通过额外授权绕过这一上限。**申请人仍能查看自己的申请状态和拒绝原因。待审核、被拒绝和被停用状态优先于等级及授权；只有已通过审核且正常的账号能获得新增权限。
+
+管理他人的可见范围、启停、删除和成绩等高风险操作需要填写 3–1000 字原因。修改账号、配额和权限也需要原因。删除整个实例要求 `X-Admin-Confirm` 为该实例 ID，批量删除和删除账号要求值为 `delete`；面板仍显示影响范围并要求输入“删除”。操作原因通过 URL 编码后的 `X-Admin-Reason` 请求头传递；账号和权限接口使用 JSON `reason` 字段，删除账号使用 `X-Admin-Reason`。默认实例继续不可删除。
+
+“操作记录”按权限范围展示操作者、时间、目标、原因、结果和变更前后信息，支持翻页；无删除/修改审计记录的管理接口。大批量操作保留总数，明细最多 500 条，并以 `detailsTruncated` 标记；审计不是资源备份。口令、Cookie、请求体中的谱面包和成绩 token 不写入审计。退出或切换账号时清除页面中的缓存记录。
+
+升级时保留现有账号、超级管理员、审批状态和配额。旧“审核注册”授权迁移为管理员等级及等价权限规则，不自动获得停用账号等新权限；旧的纯实例管理授权迁移为高级成员及原有范围的明确授权。旧的两个布尔授权参数不再接受，须使用新格式。
 
 普通用户不能修改域名绑定；该设置由超级管理员维护。面板账号管理权限与 Phira 客户端身份分开：实例可按 Phira UID 设置在线列表的可见范围，不使用面板账号 ID 识别游戏用户。
 
@@ -250,217 +273,15 @@ illustrator: Example Artist
 
 ## 管理 API
 
-管理 API 的认证方式：
+完整参考见 **[API 文档](docs/API.md)**，包含成员登录、Cookie/CSRF、五级权限、实例选择、全部管理接口、字段校验、响应结构、错误码和客户端接口说明。
 
-浏览器使用 `/api/admin/auth/register`、`/login` 登录后的会话 Cookie；`GET /api/admin/auth/me` 返回当前用户与 CSRF 校验值。所有浏览器写请求需要 `X-Admin-Request: 1`，已登录写请求还需要 `X-CSRF-Token`，跨站 Origin 被拒绝。`GET /api/admin/users` 与 `PATCH /api/admin/users/<id>` 仅供超级管理员管理用户配额与账号状态。以下旧令牌示例仅兼容本机 9000 管理接口；公网 HTTPS 不接受原 `ADMIN_TOKEN` 作为 API 登录凭据。
+- [成员快速开始](docs/API.md#2-成员快速开始)：登录、创建实例、上传谱面和设置 Phira 可见 UID。
+- [PowerShell 示例客户端](examples/member-api.ps1)：适用于 Windows PowerShell 5.1 / PowerShell 7，自动管理会话和 JSON 编码。
+- [接口索引](docs/API.md#12-接口索引)：查找全部管理路径。
+- [管理员审核与授权](docs/API.md#8-用户审核和授权)：审核版本、权限版本、额外授权和强制退出。
+- [错误码与常见问题](docs/API.md#11-错误码与重试)：排查登录后 403、缺少原因、未带删除确认、上传后不可见等问题。
 
-```http
-Authorization: Bearer <ADMIN_TOKEN>
-```
-
-也支持：
-
-```http
-X-Admin-Token: <ADMIN_TOKEN>
-```
-
-### 查看管理数据
-
-```http
-GET /api/admin/dashboard
-```
-
-响应：
-
-```json
-{
-  "charts": [],
-  "records": [],
-  "players": []
-}
-```
-
-### 上传谱面
-
-`package` 为必填字段，接受单个 `.pez`、单个 `.zip` 或上述合集 ZIP。上传合集时会批量返回 `created` 和 `skipped` 两个结果数组。metadata 字段可以省略，省略时从包内的 `info.yml`、`info.yaml` 或 `info.txt` 读取。
-
-```bash
-curl -k \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -F "package=@chart.zip" \\
-  http://127.0.0.1:9000/api/admin/charts
-```
-
-也可以填写 metadata：
-
-```bash
-curl -k \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -F "name=Example Chart" \\
-  -F "level=AT Lv.17" \\
-  -F "difficulty=17" \\
-  -F "charter=Example Charter" \\
-  -F "package=@chart.pez" \\
-  http://127.0.0.1:9000/api/admin/charts
-```
-
-上传响应示例：
-
-```json
-{
-  "id": 1500000001,
-  "name": "Example Chart",
-  "level": "AT Lv.17",
-  "difficulty": 17,
-  "charter": "Example Charter",
-  "file": "https://example.com/private-charts/1500000001.pez",
-  "illustration": "https://example.com/private-files/1500000001/illustration.jpg",
-  "preview": "https://example.com/private-files/1500000001/preview.mp3"
-}
-```
-
-### 查看谱面
-
-```http
-GET /api/admin/charts
-```
-
-### 修改谱面 metadata
-
-```bash
-curl -k -X PUT \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"Updated Chart","charter":"Updated Charter","difficulty":17}' \\
-  http://127.0.0.1:9000/api/admin/charts/1500000001
-```
-
-### 删除谱面
-
-删除谱面时会同时删除本地资源和该谱面的本地成绩。
-
-```bash
-curl -k -X DELETE \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  http://127.0.0.1:9000/api/admin/charts/1500000001
-```
-
-### 批量删除谱面
-
-按 Chart ID 删除：
-
-```bash
-curl -k -X POST \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"ids":[1500000001,1500000002]}' \\
-  http://127.0.0.1:9000/api/admin/charts/batch-delete
-```
-
-按标签删除：
-
-```bash
-curl -k -X POST \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"tags":["ranked"]}' \\
-  http://127.0.0.1:9000/api/admin/charts/batch-delete
-```
-
-删除全部私有谱面：
-
-```bash
-curl -k -X POST \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"all":true}' \\
-  http://127.0.0.1:9000/api/admin/charts/batch-delete
-```
-
-批量删除响应：
-
-```json
-{
-  "ok": true,
-  "deletedIds": [1500000001],
-  "recordsDeleted": 3
-}
-```
-
-### 批量修改标签
-
-使用 `ids` 指定谱面，`mode` 支持：
-
-- `replace`：覆盖为指定标签
-- `add`：追加标签
-- `remove`：移除指定标签
-
-```bash
-curl -k -X POST \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"ids":[1500000001,1500000002],"tags":["featured","test"],"mode":"add"}' \\
-  http://127.0.0.1:9000/api/admin/charts/batch-tags
-```
-
-也可以使用 `all: true` 修改全部私有谱面，或使用 `matchTags` 按已有标签筛选目标：
-
-```json
-{
-  "matchTags": ["old"],
-  "tags": ["new"],
-  "mode": "replace"
-}
-```
-
-接口会返回实际发生变化的谱面列表。管理页面中选择谱面后，可直接选择覆盖、追加或移除标签。
-
-### 上传成绩
-
-```bash
-curl -k -X POST \\
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "player": 10001,
-    "chart": 1500000001,
-    "score": 985000,
-    "accuracy": 0.985,
-    "perfect": 950,
-    "good": 20,
-    "bad": 3,
-    "miss": 2,
-    "maxCombo": 800,
-    "fullCombo": false
-  }' \\
-  http://127.0.0.1:9000/api/admin/records
-```
-
-`accuracy` 可以使用 `0-1` 或 `0-100` 的形式。
-
-原版客户端在游玩结束时会自动请求 `POST /play/upload`，请求体包含 `chart`、`chartUpdated` 和客户端生成的 `token`。对于已注册的私有谱面，Gateway 会在本地验证 token、校验谱面和认证用户、计算并保存成绩，然后返回客户端所需的成功响应；不会把该私有成绩上传到官方上游。未注册的谱面会继续按原有逻辑透明代理。
-
-私有成绩解码需要 `PRIVATE_RECORD_VERIFICATION_KEY_PATH` 指向 `decoder/record-verification-key.bin`。缺少或长度不正确时，私有成绩上传返回 503；官方成绩代理不受影响。
-
-### 查看和删除成绩
-
-```http
-GET    /api/admin/records
-DELETE /api/admin/records/<record-id>
-```
-
-按谱面或玩家筛选：
-
-```http
-GET /api/admin/records?chart=1500000001
-GET /api/admin/records?player=10001
-```
-
-### 查看排行榜
-
-```http
-GET /api/admin/leaderboard/1500000001
-```
+成员通过自己的面板账号登录，在同一入口使用会话 Cookie；写请求还需管理请求头和同一会话的 CSRF 值。谱面、成绩及下载接口明确传入 `?instance=自己的实例ID`。原 `ADMIN_TOKEN` 仅兼容本机维护入口，不能用于公网成员认证。
 
 ## Chart ID
 
@@ -532,13 +353,26 @@ PRIVATE_CHART_LISTING=false
 
 ## 多人房间
 
-多人服务默认使用 TCP 12348：
+多人游戏仅使用 `mp-server/PMP+`，默认 TCP 端口为 12356：
 
 ```text
-<服务器地址>:12348
+<服务器地址>:12356
 ```
 
-支持两名玩家的基本流程：
+仓库包含当前兼容版本的 PMP+ 源码快照，但不会提交真实数据库连接、管理令牌、插件和运行数据。首次部署时先复制示例配置，再填写本机值：
+
+```powershell
+Copy-Item mp-server/server_config.example.yml mp-server/server_config.yml
+Copy-Item mp-server/docker-compose.example.yml mp-server/docker-compose.yml
+```
+
+使用 Docker Compose 时还需在本机设置 `PMP_POSTGRES_PASSWORD`；不要把真实密码写回示例文件或提交到 Git。
+
+PMP+ 负责完整房间状态、玩家与 monitor 身份、选谱、准备、同步开局、判定与成绩流程。Windows 下运行 `start-probe.cmd` 或 `npm.cmd run start:quick` 会先确认 PMP+ 启动成功，再启动网关；`stop-probe.cmd` 会停止两项服务。
+
+管理面板的“多人房间”页面已接入 PMP+ 原生管理接口。高级成员和管理员可以创建并管理自己拥有的长期托管房或一次性预约白名单房，超级管理员可以管理全部房间；网页房间所有者与 Phira 协议房主相互独立。托管房玩家 UID 可留空，留空表示所有玩家均可进入；预约白名单房仍要求填写玩家 UID。可管理字段包括白名单、容量、协议房主、谱面模式和本地随机谱池，也可发送公告和解散房间。网关只在服务端使用 `PMP_ADMIN_TOKEN`，不会把 PMP 管理令牌交给浏览器；未单独设置时使用 `ADMIN_TOKEN`。长期托管房定义（含网页所有者）存放在 PMP+ 的 PostgreSQL 中，网关不复制房间数据。
+
+基本流程：
 
 1. 创建房间
 2. 加入房间
@@ -568,9 +402,11 @@ data/private-records/records.sqlite
 
 ## 测试
 
+`node scripts/test-admin-policy.js` 使用隔离数据库和临时端口验证五级上限、指定范围、过期授权、禁止优先、原子字段检查、上传不越过上架权限、管理员保护、操作原因、删除确认、强制退出、审计隔离、降级、实例重建及重启持久化。`scripts/test-admin-ui.js` 还覆盖等级编辑、指定实例授权、审核入口限制、手机布局和操作记录页面。
+
 `node scripts/test-instance-visibility.js` 使用隔离数据和本地模拟 HTTPS 上游，验证单个/多个 UID、全部可见/隐藏、身份验证和伪造拦截、缓存、搜索与分页、跨实例资源和成绩定位，以及全局 ID 唯一性，不请求官方 API。浏览器回归包含可见范围选择和保存，预览位于 `artifacts/admin-ui/visibility.png`。
 
-`node scripts/test-admin-accounts.js` 使用完全隔离的数据库和临时端口，验证旧账号迁移、注册资料、审核/拒绝/重提、过期资料与并发审核、授权和撤权，以及会话、越权拦截、并发配额、CSRF、账号停用与密码修改，不使用生产令牌或用户数据。浏览器回归还覆盖申请资料展示、授权人员实际审核和权限变更后的界面。
+`node scripts/test-admin-accounts.js` 使用完全隔离的数据库和临时端口，验证旧账号迁移、注册资料、审核/拒绝/重提、过期资料与并发审核、授权和撤权，以及会话、越权拦截、并发配额、CSRF、账号停用、永久删除、实例保留与密码修改，不使用生产令牌或用户数据。浏览器回归还覆盖申请资料展示、授权人员实际审核和权限变更后的界面。
 
 管理台浏览器回归使用 Playwright 和已安装的 Microsoft Edge。先构建项目，再运行 `node scripts/test-admin-ui.js`；若 Playwright 安装在项目之外，可通过 `ADMIN_UI_PLAYWRIGHT_PATH` 指定其模块目录。测试会创建随机命名的隔离数据目录和临时端口，退出时清理测试数据，不读取生产令牌。仅含合成数据的桌面、手机与上传页截图输出到 `artifacts/admin-ui/`。
 
@@ -587,5 +423,23 @@ curl -k https://127.0.0.1:8443/health
 ```
 
 ## License
+
+## 成绩解码器插件与无密钥运行模式
+
+成绩上传解码器通过 `PRIVATE_RECORD_DECODER_PLUGIN` 作为可选插件加载，默认使用：
+
+```text
+decoder/decoder-dist/private-upload-adapter.js
+```
+
+真实验签还需要配置：
+
+```text
+PRIVATE_RECORD_VERIFICATION_KEY_PATH=decoder/record-verification-key.bin
+```
+
+`decoder/record-verification-key.bin` 已由 `.gitignore` 排除，不应提交到 GitHub。没有这个密钥，或解码器插件不存在时，网关仍然可以正常启动；注册私有谱面的成绩上传会返回兼容客户端的成功响应，但不会验签，也不会保存成绩。这是本地开发/演示用的假成功模式，不能用于生产环境，否则任何人都可以伪造上传结果。
+
+如果要启用真实成绩验证，请同时提供密钥和插件，并重启网关。插件可以导出 `handlePrivateUpload`，并从同目录的 `phira-record-decoder.js` 导出 `decodePhiraRecordToken`；也可以在同一个模块中导出两个函数。
 
 本项目代码使用 [MIT License](LICENSE) 发布。该许可证只适用于本项目自有代码，不适用于谱面、音乐、曲绘或其他第三方内容。

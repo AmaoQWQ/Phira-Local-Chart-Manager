@@ -9,14 +9,34 @@ export interface Config {
   multiplayerHost: string;
   multiplayerPort: number;
   upstreamBaseUrl: string;
+  /** Stable public origin used in private chart resource URLs. */
+  publicBaseUrl: string | null;
   privateChartsPath: string;
   instancesPath: string;
   privateChartListing: boolean;
   privateRecordsPath: string;
   privateRecordsDatabasePath: string;
   privateRecordVerificationKeyPath: string | null;
+  /** Optional record decoder adapter; the gateway can run without it. */
+  privateRecordDecoderPluginPath: string | null;
   privateTokenCapturePath: string | null;
   adminToken: string;
+  /** Vendored phira-web-monitor renderer (`pkg/`, `bin/`, optional `respack/`). */
+  monitorRendererPath: string;
+  /** Compiled chart payloads awaiting reuse by the preview. */
+  monitorCachePath: string;
+  monitorCacheMaxBytes: number;
+  /** Phira-mp+ HTTP/SSE base (its documented `http_port`, not the game port). */
+  pmpBaseUrl: string;
+  /** Opt-in: without it the gateway makes no background connections to PMP. */
+  pmpMonitorEnabled: boolean;
+  /** Plugin-registered route returning the room snapshot, if one is installed. */
+  pmpRoomsSnapshotPath: string;
+  /** Event stream path: PMP's `/api/events`, or the plugin's filtered `/api/rooms/listen`. */
+  pmpEventsPath: string;
+  pmpMonitorToken: string | null;
+  /** PMP+ native room-management token; never sent to the browser. */
+  pmpAdminToken: string;
   certPath: string;
   keyPath: string;
   logToFile: boolean;
@@ -37,6 +57,17 @@ function positiveIntegerFromEnv(name: string, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+/** Like the positive variant, but 0 is meaningful ("cap disabled") for cache limits. */
+function nonNegativeIntegerFromEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
   }
   return parsed;
 }
@@ -65,10 +96,13 @@ export function loadConfig(): Config {
     host: process.env.HOST || "0.0.0.0",
     port: positiveIntegerFromEnv("PORT", 443),
     adminPort: positiveIntegerFromEnv("ADMIN_PORT", 9000),
-    multiplayerEnabled: booleanFromEnv("MULTIPLAYER_ENABLED", true),
+    // The in-process multiplayer server is a legacy test/fallback implementation.
+    // Production multiplayer is provided by the colocated mp-server/PMP+ service.
+    multiplayerEnabled: booleanFromEnv("MULTIPLAYER_ENABLED", false),
     multiplayerHost: process.env.MULTIPLAYER_HOST || "0.0.0.0",
     multiplayerPort: positiveIntegerFromEnv("MULTIPLAYER_PORT", 12348),
     upstreamBaseUrl: process.env.UPSTREAM_BASE_URL || "https://phira.5wyxi.com",
+    publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "") || null,
     privateChartsPath: resolveFromProjectRoot(process.env.PRIVATE_CHARTS_PATH || "data/private-charts"),
     instancesPath: resolveFromProjectRoot(process.env.INSTANCE_REGISTRY_PATH || "data/instances/instances.json"),
     // No chart assets are bundled in the public template. Enable listing only
@@ -79,10 +113,29 @@ export function loadConfig(): Config {
     privateRecordVerificationKeyPath: process.env.PRIVATE_RECORD_VERIFICATION_KEY_PATH
       ? resolveFromProjectRoot(process.env.PRIVATE_RECORD_VERIFICATION_KEY_PATH)
       : resolveFromProjectRoot("decoder/record-verification-key.bin"),
+    privateRecordDecoderPluginPath: process.env.PRIVATE_RECORD_DECODER_PLUGIN
+      ? resolveFromProjectRoot(process.env.PRIVATE_RECORD_DECODER_PLUGIN)
+      : resolveFromProjectRoot("decoder/decoder-dist/private-upload-adapter.js"),
     privateTokenCapturePath: process.env.PRIVATE_TOKEN_CAPTURE_PATH
       ? resolveFromProjectRoot(process.env.PRIVATE_TOKEN_CAPTURE_PATH)
       : null,
     adminToken: process.env.ADMIN_TOKEN || "",
+    monitorRendererPath: resolveFromProjectRoot(process.env.MONITOR_RENDERER_PATH || "vendor/renderer"),
+    monitorCachePath: resolveFromProjectRoot(process.env.MONITOR_CACHE_PATH || "data/monitor-cache"),
+    // A compiled payload embeds decoded PCM (~90 MB for four minutes of stereo audio).
+    monitorCacheMaxBytes: nonNegativeIntegerFromEnv("MONITOR_CACHE_MAX_MB", 2048) * 1024 * 1024,
+    // PMP's HTTP/SSE/WebSocket port is `http_port` in its config (the game port is separate).
+    pmpBaseUrl: (process.env.PMP_BASE_URL || "http://127.0.0.1:12347").replace(/\/+$/, ""),
+    // Off by default: nothing connects to PMP until it is actually deployed.
+    pmpMonitorEnabled: booleanFromEnv("PMP_MONITOR_ENABLED", false),
+    // Room snapshots have no built-in HTTP route; a plugin must serve this one. The
+    // HSNPhira v2 plugin serves the gooophira-compatible list here (and `/api/rooms/info`).
+    pmpRoomsSnapshotPath: process.env.PMP_ROOMS_SNAPSHOT_PATH || "/api/rooms",
+    pmpEventsPath: process.env.PMP_EVENTS_PATH || "/api/events",
+    pmpMonitorToken: process.env.PMP_MONITOR_TOKEN || null,
+    // The colocated PMP+ inherits ADMIN_TOKEN by default. A separate token can be
+    // supplied when the two services are managed independently.
+    pmpAdminToken: process.env.PMP_ADMIN_TOKEN || process.env.ADMIN_TOKEN || "",
     certPath: resolveFromProjectRoot(process.env.TLS_CERT_PATH || "certs/server.crt"),
     keyPath: resolveFromProjectRoot(process.env.TLS_KEY_PATH || "certs/server.key"),
     logToFile: booleanFromEnv("LOG_TO_FILE", false),

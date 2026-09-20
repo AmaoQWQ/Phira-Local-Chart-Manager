@@ -4,7 +4,7 @@ const { spawn, spawnSync } = require("node:child_process");
 
 const projectRoot = path.resolve(__dirname, "..");
 const distEntry = path.join(projectRoot, "dist", "index.js");
-const pidFile = path.join(projectRoot, ".phira-api-probe.pid");
+const pidFile = path.join(projectRoot, ".phira-local-chart-manager.pid");
 const serverLog = path.join(projectRoot, "logs", "server.log");
 const serverErrorLog = path.join(projectRoot, "logs", "server-error.log");
 
@@ -49,7 +49,7 @@ function ensureBuildExists() {
 function start() {
   const existingPid = readPid();
   if (existingPid && processExists(existingPid)) {
-    console.log(`Phira API Probe is already running (PID ${existingPid}).`);
+    console.log(`Phira 本地谱面管理系统已在运行（PID ${existingPid}）。`);
     return;
   }
   if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
@@ -74,15 +74,15 @@ function start() {
   fs.closeSync(output);
   fs.closeSync(errors);
   fs.writeFileSync(pidFile, `${child.pid}\n`, "utf8");
-  console.log(`Phira API Probe started in the background (PID ${child.pid}).`);
-  console.log(`Server output: ${serverLog}`);
+  console.log(`Phira 本地谱面管理系统已在后台启动（PID ${child.pid}）。`);
+  console.log(`服务日志：${serverLog}`);
 }
 
 function stop() {
   const pid = readPid();
   if (!pid) {
     if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
-    console.log("Phira API Probe is not running.");
+    console.log("Phira 本地谱面管理系统未在运行。");
     return;
   }
 
@@ -101,7 +101,7 @@ function stop() {
   }
 
   fs.unlinkSync(pidFile);
-  console.log(`Phira API Probe stopped (PID ${pid}).`);
+  console.log(`Phira 本地谱面管理系统已停止（PID ${pid}）。`);
 }
 
 const command = process.argv[2];

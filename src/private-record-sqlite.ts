@@ -73,11 +73,14 @@ function keyOrNull(row: SqlRow, key: string): string {
 
 export class PrivateRecordSqliteStore {
   private readonly db: DatabaseSync;
+  private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
 
   constructor(databasePath: string, legacyJsonPath: string) {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
     this.db = new DatabaseSync(databasePath);
-    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
+    // synchronous=NORMAL is the standard durability/throughput trade-off for WAL mode:
+    // commits stop fsyncing on every write while a crash still cannot corrupt the file.
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -133,16 +136,31 @@ export class PrivateRecordSqliteStore {
   }
 
   close(): void {
+    this.statements.clear();
     this.db.close();
   }
 
+  /**
+   * Reuses compiled statements. Every SQL string in this class is a fixed template
+   * (filters only change bound parameters), so the cache stays a small bounded set and
+   * read paths stop recompiling the same statement on every request.
+   */
+  private statement(sql: string): ReturnType<DatabaseSync["prepare"]> {
+    let cached = this.statements.get(sql);
+    if (cached === undefined) {
+      cached = this.db.prepare(sql);
+      this.statements.set(sql, cached);
+    }
+    return cached;
+  }
+
   private meta(key: string): string | null {
-    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as SqlRow | undefined;
+    const row = this.statement("SELECT value FROM meta WHERE key = ?").get(key) as SqlRow | undefined;
     return row ? rowString(row, "value") : null;
   }
 
   private setMeta(key: string, value: string): void {
-    this.db.prepare("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+    this.statement("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
   private migrateLegacyJson(legacyJsonPath: string): void {
@@ -159,7 +177,7 @@ export class PrivateRecordSqliteStore {
         }>;
         this.db.exec("BEGIN IMMEDIATE");
         for (const player of Object.values(parsed.players || {})) {
-          this.db.prepare(`INSERT OR IGNORE INTO players(id, name, joined, last_login, source_name, source_avatar)
+          this.statement(`INSERT OR IGNORE INTO players(id, name, joined, last_login, source_name, source_avatar)
             VALUES(?, ?, ?, ?, ?, ?)`).run(
             Number(player.id), String(player.name || "Private Player"), String(player.joined || new Date().toISOString()),
             String(player.lastLogin || player.joined || new Date().toISOString()),
@@ -169,11 +187,11 @@ export class PrivateRecordSqliteStore {
         }
         for (const [authKey, userId] of Object.entries(parsed.authBindings || {})) {
           if (/^[a-f0-9]{64}$/i.test(authKey) && Number.isSafeInteger(Number(userId))) {
-            this.db.prepare("INSERT OR IGNORE INTO auth_bindings(auth_key, user_id) VALUES(?, ?)").run(authKey, Number(userId));
+            this.statement("INSERT OR IGNORE INTO auth_bindings(auth_key, user_id) VALUES(?, ?)").run(authKey, Number(userId));
           }
         }
         for (const record of parsed.records || []) {
-          this.db.prepare(`INSERT OR IGNORE INTO records(
+          this.statement(`INSERT OR IGNORE INTO records(
             id, player, chart, score, accuracy, full_combo, perfect, good, bad, miss, max_combo,
             speed, mods, best, best_std, time, std, std_score, payload_sha256
           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
@@ -187,12 +205,12 @@ export class PrivateRecordSqliteStore {
         }
         for (const rating of parsed.ratings || []) {
           if (typeof rating.owner !== "string") continue;
-          this.db.prepare("INSERT OR IGNORE INTO ratings(owner, chart, score, time) VALUES(?, ?, ?, ?)").run(
+          this.statement("INSERT OR IGNORE INTO ratings(owner, chart, score, time) VALUES(?, ?, ?, ?)").run(
             rating.owner, Number(rating.chart), Number(rating.score), String(rating.time || new Date().toISOString()),
           );
         }
         const requestedNextId = Number(parsed.nextRecordId) || FIRST_RECORD_ID;
-        const maxIdRow = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS max_id FROM records").get() as SqlRow;
+        const maxIdRow = this.statement("SELECT COALESCE(MAX(id), 0) AS max_id FROM records").get() as SqlRow;
         const nextId = Math.max(requestedNextId, rowNumber(maxIdRow, "max_id") + 1, FIRST_RECORD_ID);
         this.setMeta("next_record_id", String(nextId));
         this.db.exec("COMMIT");
@@ -212,14 +230,22 @@ export class PrivateRecordSqliteStore {
 
   playerIdForAuthorization(authorization: string | string[] | undefined): number {
     const authKey = this.authorizationKey(authorization);
-    const binding = this.db.prepare("SELECT user_id FROM auth_bindings WHERE auth_key = ?").get(authKey) as SqlRow | undefined;
+    const binding = this.statement("SELECT user_id FROM auth_bindings WHERE auth_key = ?").get(authKey) as SqlRow | undefined;
     const digest = Buffer.from(authKey, "hex");
     const boundId = binding ? rowNumber(binding, "user_id") : 0;
     const id = boundId > 0 ? boundId : PRIVATE_PLAYER_BASE + (digest.readUInt32BE(0) % PRIVATE_PLAYER_RANGE);
     const now = new Date().toISOString();
-    const existing = this.db.prepare("SELECT id FROM players WHERE id = ?").get(id);
-    if (existing) this.db.prepare("UPDATE players SET last_login = ? WHERE id = ?").run(now, id);
-    else this.db.prepare("INSERT INTO players(id, name, joined, last_login) VALUES(?, ?, ?, ?)").run(id, "Private Player", now, now);
+    const existing = this.statement("SELECT id, last_login FROM players WHERE id = ?").get(id) as SqlRow | undefined;
+    if (existing) {
+      // Profile and record reads must not take the write lock on every request, so the
+      // last-seen timestamp is refreshed at most once a minute.
+      const lastSeen = Date.parse(rowString(existing, "last_login"));
+      if (!Number.isFinite(lastSeen) || Date.now() - lastSeen > 60_000) {
+        this.statement("UPDATE players SET last_login = ? WHERE id = ?").run(now, id);
+      }
+    } else {
+      this.statement("INSERT INTO players(id, name, joined, last_login) VALUES(?, ?, ?, ?)").run(id, "Private Player", now, now);
+    }
     return id;
   }
 
@@ -227,21 +253,21 @@ export class PrivateRecordSqliteStore {
     const value = Array.isArray(authorization) ? authorization.join(",") : authorization;
     if (!value || !Number.isSafeInteger(userId) || userId <= 0) return null;
     const authKey = this.authorizationKey(authorization);
-    const existing = this.db.prepare("SELECT user_id FROM auth_bindings WHERE auth_key = ?").get(authKey) as SqlRow | undefined;
+    const existing = this.statement("SELECT user_id FROM auth_bindings WHERE auth_key = ?").get(authKey) as SqlRow | undefined;
     if (existing && rowNumber(existing, "user_id") !== userId) return null;
-    this.db.prepare("INSERT INTO auth_bindings(auth_key, user_id) VALUES(?, ?) ON CONFLICT(auth_key) DO UPDATE SET user_id = excluded.user_id").run(authKey, userId);
+    this.statement("INSERT INTO auth_bindings(auth_key, user_id) VALUES(?, ?) ON CONFLICT(auth_key) DO UPDATE SET user_id = excluded.user_id").run(authKey, userId);
     const now = new Date().toISOString();
-    if (this.db.prepare("SELECT id FROM players WHERE id = ?").get(userId)) this.db.prepare("UPDATE players SET last_login = ? WHERE id = ?").run(now, userId);
-    else this.db.prepare("INSERT INTO players(id, name, joined, last_login) VALUES(?, ?, ?, ?)").run(userId, "Private Player", now, now);
+    if (this.statement("SELECT id FROM players WHERE id = ?").get(userId)) this.statement("UPDATE players SET last_login = ? WHERE id = ?").run(now, userId);
+    else this.statement("INSERT INTO players(id, name, joined, last_login) VALUES(?, ?, ?, ?)").run(userId, "Private Player", now, now);
     return userId;
   }
 
   hasPlayer(id: number): boolean {
-    return id !== PRIVATE_UPLOADER_ID && Boolean(this.db.prepare("SELECT 1 FROM players WHERE id = ?").get(id));
+    return id !== PRIVATE_UPLOADER_ID && Boolean(this.statement("SELECT 1 FROM players WHERE id = ?").get(id));
   }
 
   userMetadata(id: number): Record<string, unknown> | null {
-    const player = this.db.prepare("SELECT * FROM players WHERE id = ?").get(id) as SqlRow | undefined;
+    const player = this.statement("SELECT * FROM players WHERE id = ?").get(id) as SqlRow | undefined;
     if (!player) return null;
     const sourceName = rowString(player, "source_name") || rowString(player, "name", "Private Player");
     const displayName = `${sourceName.replace(/-P$/, "")}-P`;
@@ -265,14 +291,14 @@ export class PrivateRecordSqliteStore {
   }
 
   updatePlayerProfile(id: number, name: string, avatar: string | null): boolean {
-    if (!name.trim() || !this.db.prepare("SELECT id FROM players WHERE id = ?").get(id)) return false;
-    this.db.prepare("UPDATE players SET source_name = ?, source_avatar = ? WHERE id = ?").run(name.trim(), avatar, id);
+    if (!name.trim() || !this.statement("SELECT id FROM players WHERE id = ?").get(id)) return false;
+    this.statement("UPDATE players SET source_name = ?, source_avatar = ? WHERE id = ?").run(name.trim(), avatar, id);
     return true;
   }
 
   upload(player: number, chart: number, summary: PrivateRecordSummary, payloadSha256?: string): Record<string, unknown> {
     if (payloadSha256) {
-      const duplicate = this.db.prepare("SELECT id, best FROM records WHERE player = ? AND chart = ? AND payload_sha256 = ?").get(player, chart, payloadSha256) as SqlRow | undefined;
+      const duplicate = this.statement("SELECT id, best FROM records WHERE player = ? AND chart = ? AND payload_sha256 = ?").get(player, chart, payloadSha256) as SqlRow | undefined;
       if (duplicate) return { id: rowNumber(duplicate, "id"), expDelta: 0, newBest: rowNumber(duplicate, "best") !== 0, improvement: 0, newRks: 0 };
     }
     const previous = this.best(player, chart);
@@ -280,10 +306,10 @@ export class PrivateRecordSqliteStore {
     const time = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      if (isBest) this.db.prepare("UPDATE records SET best = 0 WHERE player = ? AND chart = ?").run(player, chart);
-      const nextId = rowNumber(this.db.prepare("SELECT value FROM meta WHERE key = 'next_record_id'").get() as SqlRow, "value", FIRST_RECORD_ID);
-      this.db.prepare("UPDATE meta SET value = ? WHERE key = 'next_record_id'").run(String(nextId + 1));
-      this.db.prepare(`INSERT INTO records(
+      if (isBest) this.statement("UPDATE records SET best = 0 WHERE player = ? AND chart = ?").run(player, chart);
+      const nextId = rowNumber(this.statement("SELECT value FROM meta WHERE key = 'next_record_id'").get() as SqlRow, "value", FIRST_RECORD_ID);
+      this.statement("UPDATE meta SET value = ? WHERE key = 'next_record_id'").run(String(nextId + 1));
+      this.statement(`INSERT INTO records(
         id, player, chart, score, accuracy, full_combo, perfect, good, bad, miss, max_combo,
         speed, mods, best, best_std, time, std, std_score, payload_sha256
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
@@ -300,7 +326,7 @@ export class PrivateRecordSqliteStore {
   }
 
   best(player: number, chart: number): PrivateRecord | null {
-    const row = this.db.prepare("SELECT * FROM records WHERE player = ? AND chart = ? AND best = 1 ORDER BY score DESC, accuracy DESC, time ASC LIMIT 1").get(player, chart) as SqlRow | undefined;
+    const row = this.statement("SELECT * FROM records WHERE player = ? AND chart = ? AND best = 1 ORDER BY score DESC, accuracy DESC, time ASC LIMIT 1").get(player, chart) as SqlRow | undefined;
     return row ? rowToRecord(row) : null;
   }
 
@@ -310,12 +336,12 @@ export class PrivateRecordSqliteStore {
   }
 
   leaderboard(chart: number, _std: boolean): Record<string, unknown>[] {
-    const rows = this.db.prepare("SELECT * FROM records WHERE chart = ? AND best = 1 ORDER BY score DESC, accuracy DESC, time ASC LIMIT 15").all(chart) as SqlRow[];
+    const rows = this.statement("SELECT * FROM records WHERE chart = ? AND best = 1 ORDER BY score DESC, accuracy DESC, time ASC LIMIT 15").all(chart) as SqlRow[];
     return rows.map((row, index) => this.toApiRecord(rowToRecord(row), index + 1));
   }
 
   playerRecords(player: number): Record<string, unknown>[] {
-    const rows = this.db.prepare("SELECT * FROM records WHERE player = ? ORDER BY time DESC LIMIT 100").all(player) as SqlRow[];
+    const rows = this.statement("SELECT * FROM records WHERE player = ? ORDER BY time DESC LIMIT 100").all(player) as SqlRow[];
     return rows.map((row) => this.toApiRecord(rowToRecord(row)));
   }
 
@@ -324,26 +350,69 @@ export class PrivateRecordSqliteStore {
     const params: number[] = [];
     if (filters.chart !== undefined) { clauses.push("chart = ?"); params.push(filters.chart); }
     if (filters.player !== undefined) { clauses.push("player = ?"); params.push(filters.player); }
-    const rows = this.db.prepare(`SELECT * FROM records WHERE ${clauses.join(" AND ")} ORDER BY time DESC`).all(...params) as SqlRow[];
+    const rows = this.statement(`SELECT * FROM records WHERE ${clauses.join(" AND ")} ORDER BY time DESC`).all(...params) as SqlRow[];
     return rows.map((row) => this.toApiRecord(rowToRecord(row)));
   }
 
   adminPlayers(): Record<string, unknown>[] {
-    const rows = this.db.prepare("SELECT id, name, joined, last_login AS lastLogin FROM players ORDER BY id").all() as SqlRow[];
+    const rows = this.statement("SELECT id, name, joined, last_login AS lastLogin FROM players ORDER BY id").all() as SqlRow[];
     return rows.map((row) => ({ id: rowNumber(row, "id"), name: rowString(row, "name"), joined: rowString(row, "joined"), lastLogin: rowString(row, "lastLogin") }));
+  }
+
+  /** Shared WHERE fragment for the record list/count queries. */
+  private recordFilter(filters: { chart?: number; player?: number }): { clause: string; params: number[] } {
+    const clauses = ["1 = 1"];
+    const params: number[] = [];
+    if (filters.chart !== undefined) { clauses.push("chart = ?"); params.push(filters.chart); }
+    if (filters.player !== undefined) { clauses.push("player = ?"); params.push(filters.player); }
+    return { clause: clauses.join(" AND "), params };
+  }
+
+  /** Number of matching rows, counted by SQLite instead of materialising them. */
+  countRecords(filters: { chart?: number; player?: number } = {}): number {
+    const { clause, params } = this.recordFilter(filters);
+    const row = this.statement(`SELECT COUNT(*) AS count FROM records WHERE ${clause}`).get(...params) as SqlRow;
+    return rowNumber(row, "count");
+  }
+
+  /**
+   * Highest record id in the table. Insert ids increase monotonically, so the value
+   * captured before a request identifies everything that request created.
+   */
+  maxRecordId(): number {
+    const row = this.statement("SELECT COALESCE(MAX(id), 0) AS max_id FROM records").get() as SqlRow;
+    return rowNumber(row, "max_id");
+  }
+
+  /** A bounded page of records, newest first, for audit snapshots and listings. */
+  recentRecords(filters: { chart?: number; player?: number } = {}, limit = 500): Record<string, unknown>[] {
+    const { clause, params } = this.recordFilter(filters);
+    const rows = this.statement(`SELECT * FROM records WHERE ${clause} ORDER BY time DESC LIMIT ?`).all(...params, limit) as SqlRow[];
+    return rows.map((row) => this.toApiRecord(rowToRecord(row)));
+  }
+
+  /** Records created after the given id, newest first, bounded by limit. */
+  recordsAfter(id: number, limit = 500): Record<string, unknown>[] {
+    const rows = this.statement("SELECT * FROM records WHERE id > ? ORDER BY time DESC LIMIT ?").all(id, limit) as SqlRow[];
+    return rows.map((row) => this.toApiRecord(rowToRecord(row)));
+  }
+
+  recordById(id: number): Record<string, unknown> | null {
+    const row = this.statement("SELECT * FROM records WHERE id = ?").get(id) as SqlRow | undefined;
+    return row ? this.toApiRecord(rowToRecord(row)) : null;
   }
 
   adminUpload(player: number, chart: number, summary: PrivateRecordSummary): Record<string, unknown> {
     const result = this.upload(player, chart, summary) as { id: number };
-    return this.adminRecords().find((record) => record.id === result.id) || result;
+    return this.recordById(result.id) || result;
   }
 
   deleteRecord(id: number): boolean {
-    const row = this.db.prepare("SELECT player, chart FROM records WHERE id = ?").get(id) as SqlRow | undefined;
+    const row = this.statement("SELECT player, chart FROM records WHERE id = ?").get(id) as SqlRow | undefined;
     if (!row) return false;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
+      this.statement("DELETE FROM records WHERE id = ?").run(id);
       this.recalculateBest(rowNumber(row, "player"), rowNumber(row, "chart"));
       this.db.exec("COMMIT");
       return true;
@@ -354,11 +423,11 @@ export class PrivateRecordSqliteStore {
   }
 
   deleteChartRecords(chart: number): number {
-    const count = rowNumber(this.db.prepare("SELECT COUNT(*) AS count FROM records WHERE chart = ?").get(chart) as SqlRow, "count");
+    const count = rowNumber(this.statement("SELECT COUNT(*) AS count FROM records WHERE chart = ?").get(chart) as SqlRow, "count");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM records WHERE chart = ?").run(chart);
-      this.db.prepare("DELETE FROM ratings WHERE chart = ?").run(chart);
+      this.statement("DELETE FROM records WHERE chart = ?").run(chart);
+      this.statement("DELETE FROM ratings WHERE chart = ?").run(chart);
       this.db.exec("COMMIT");
       return count;
     } catch (error) {
@@ -368,9 +437,9 @@ export class PrivateRecordSqliteStore {
   }
 
   private recalculateBest(player: number, chart: number): void {
-    this.db.prepare("UPDATE records SET best = 0 WHERE player = ? AND chart = ?").run(player, chart);
-    const row = this.db.prepare("SELECT id FROM records WHERE player = ? AND chart = ? ORDER BY score DESC, accuracy DESC, time ASC LIMIT 1").get(player, chart) as SqlRow | undefined;
-    if (row) this.db.prepare("UPDATE records SET best = 1 WHERE id = ?").run(rowNumber(row, "id"));
+    this.statement("UPDATE records SET best = 0 WHERE player = ? AND chart = ?").run(player, chart);
+    const row = this.statement("SELECT id FROM records WHERE player = ? AND chart = ? ORDER BY score DESC, accuracy DESC, time ASC LIMIT 1").get(player, chart) as SqlRow | undefined;
+    if (row) this.statement("UPDATE records SET best = 1 WHERE id = ?").run(rowNumber(row, "id"));
   }
 
   private ratingOwner(authorization: string | string[] | undefined): string {
@@ -378,19 +447,19 @@ export class PrivateRecordSqliteStore {
   }
 
   ratingForAuthorization(authorization: string | string[] | undefined, chart: number): number {
-    const row = this.db.prepare("SELECT score FROM ratings WHERE owner = ? AND chart = ?").get(this.ratingOwner(authorization), chart) as SqlRow | undefined;
+    const row = this.statement("SELECT score FROM ratings WHERE owner = ? AND chart = ?").get(this.ratingOwner(authorization), chart) as SqlRow | undefined;
     return row ? rowNumber(row, "score") : 0;
   }
 
   rateForAuthorization(authorization: string | string[] | undefined, chart: number, score: number): number {
     const owner = this.ratingOwner(authorization);
-    if (score === 0) this.db.prepare("DELETE FROM ratings WHERE owner = ? AND chart = ?").run(owner, chart);
-    else this.db.prepare("INSERT INTO ratings(owner, chart, score, time) VALUES(?, ?, ?, ?) ON CONFLICT(owner, chart) DO UPDATE SET score = excluded.score, time = excluded.time").run(owner, chart, score, new Date().toISOString());
+    if (score === 0) this.statement("DELETE FROM ratings WHERE owner = ? AND chart = ?").run(owner, chart);
+    else this.statement("INSERT INTO ratings(owner, chart, score, time) VALUES(?, ?, ?, ?) ON CONFLICT(owner, chart) DO UPDATE SET score = excluded.score, time = excluded.time").run(owner, chart, score, new Date().toISOString());
     return score;
   }
 
   ratingSummary(chart: number): { rating: number | null; ratingCount: number } {
-    const row = this.db.prepare("SELECT AVG(score) AS average, COUNT(*) AS count FROM ratings WHERE chart = ?").get(chart) as SqlRow;
+    const row = this.statement("SELECT AVG(score) AS average, COUNT(*) AS count FROM ratings WHERE chart = ?").get(chart) as SqlRow;
     const count = rowNumber(row, "count");
     return count === 0 ? { rating: null, ratingCount: 0 } : { rating: Number((rowNumber(row, "average") / 10).toFixed(6)), ratingCount: count };
   }

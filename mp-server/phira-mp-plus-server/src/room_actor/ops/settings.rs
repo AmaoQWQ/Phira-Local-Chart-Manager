@@ -1,0 +1,304 @@
+use super::super::{
+    command::{RoomActorCommand, RoomCommandKind, RoomOrigin},
+    RoomCommandGateway,
+};
+use crate::server::PlusServerState;
+use serde_json::Value;
+use std::time::Instant;
+
+impl RoomCommandGateway {
+    pub async fn set_max_users(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        max_users: usize,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::SetMaxUsers {
+                _room_id: rid.clone(),
+                max_users,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetMaxUsers.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+    /// Set the room host. `None` means the system `?` host.
+    pub async fn set_host(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        target_id: Option<i32>,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::SetHost {
+                room_id: rid.clone(),
+                target_id,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetHost.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+
+    pub async fn set_lock(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        locked: bool,
+    ) -> Result<Value, String> {
+        self.set_lock_as(state, room_id, locked, 0, None, None).await
+    }
+
+    pub async fn set_lock_as(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        locked: bool,
+        actor_user_id: i32,
+        deadline: Option<Instant>,
+        origin: RoomOrigin,
+    ) -> Result<Value, String> {
+        // P0-C: non-session callers pass `None` — fall back to the internal
+        // 30s room-mailbox timeout so admin/CLI paths are not deadline-killed.
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(30));
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, Some(deadline), |reply| RoomActorCommand::SetLock {
+                room_id: rid.clone(),
+                locked,
+                actor_user_id,
+                deadline,
+                origin,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetLock.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+
+    pub async fn set_cycle(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        cycle: bool,
+    ) -> Result<Value, String> {
+        self.set_cycle_as(state, room_id, cycle, 0, None, None).await
+    }
+
+    pub async fn set_cycle_as(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        cycle: bool,
+        actor_user_id: i32,
+        deadline: Option<Instant>,
+        origin: RoomOrigin,
+    ) -> Result<Value, String> {
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(30));
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, Some(deadline), |reply| RoomActorCommand::SetCycle {
+                room_id: rid.clone(),
+                cycle,
+                actor_user_id,
+                deadline,
+                origin,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetCycle.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+    pub async fn set_hidden(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        hidden: bool,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::SetHidden {
+                room_id: rid.clone(),
+                hidden,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetHidden.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+    pub async fn set_persistent_empty(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        persistent_empty: bool,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::SetPersistentEmpty {
+                room_id: rid.clone(),
+                persistent_empty,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetPersistentEmpty.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+    pub async fn set_phira_api_endpoint(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        endpoint: Option<String>,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::SetEndpoint {
+                room_id: rid.clone(),
+                endpoint: endpoint.clone(),
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetEndpoint.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
+    /// PMP25 P4: 空房间初始化——一次性设置 endpoint 和 persistent_empty。
+    /// 失败时由调用方负责回滚 registry。
+    pub async fn init_empty_room(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        endpoint: Option<String>,
+        persistent_empty: bool,
+    ) -> Result<Value, String> {
+        // 空房间保持系统房主（host=-1）：首个加入者不应自动成为房主。
+        self.set_host(state, room_id, None)
+            .await
+            .map_err(|e| format!("init_empty_room: set system host failed: {e}"))?;
+        if let Some(ref ep) = endpoint {
+            let result = self
+                .room_mailbox(room_id, None, |reply| RoomActorCommand::SetEndpoint {
+                    room_id: room_id.to_string(),
+                    endpoint: Some(ep.clone()),
+                    reply,
+                })
+                .await;
+            if !result.is_ok() {
+                return Err("init_empty_room: set endpoint failed".to_string());
+            }
+        }
+        if persistent_empty {
+            let result = self
+                .room_mailbox(room_id, None, |reply| RoomActorCommand::SetPersistentEmpty {
+                    room_id: room_id.to_string(),
+                    persistent_empty: true,
+                    reply,
+                })
+                .await;
+            if !result.is_ok() {
+                return Err("init_empty_room: set persistent_empty failed".to_string());
+            }
+        }
+        Ok(serde_json::json!({"ok": true}))
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::room_actor::RoomCommandPayload;
+    use super::super::super::command::RoomCommandKind;
+
+    #[test]
+    fn typed_payload_serialization_round_trip() {
+        let payloads: Vec<RoomCommandPayload> = vec![
+            RoomCommandPayload::LockChanged {
+                room_id: "r1".into(),
+                locked: true,
+            },
+            RoomCommandPayload::CycleChanged {
+                room_id: "r2".into(),
+                cycle: false,
+            },
+            RoomCommandPayload::HostChanged {
+                room_id: "r3".into(),
+                host: Some(42),
+                host_name: "admin".into(),
+                host_is_system: false,
+            },
+        ];
+        for payload in &payloads {
+            let json = serde_json::to_value(payload).unwrap();
+            assert!(
+                json.is_object(),
+                "each payload should serialize to a JSON object"
+            );
+        }
+    }
+
+    #[test]
+    fn set_command_kinds_are_typed() {
+        assert_eq!(RoomCommandKind::SetLock.action(), "set_lock");
+        assert_eq!(RoomCommandKind::SetCycle.action(), "set_cycle");
+        assert_eq!(RoomCommandKind::SetHost.action(), "set_host");
+        assert_eq!(RoomCommandKind::CloseRoom.action(), "close");
+        assert_eq!(RoomCommandKind::KickUser.action(), "kick");
+    }
+}

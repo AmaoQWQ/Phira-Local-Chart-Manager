@@ -1,0 +1,147 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  auto-patch:
+    runs-on: ubuntu-latest
+    outputs:
+      build_ref: ${{ steps.patch.outputs.build_ref }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: 自动更新 C 版本号
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          FULL_VERSION=$(grep '^version = ' phira-mp-plus-server/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          MAJOR=$(echo "$FULL_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$FULL_VERSION" | cut -d. -f2)
+          CURRENT_C=$(echo "$FULL_VERSION" | cut -d. -f3)
+          PATCH=$((CURRENT_C + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "current=$CURRENT_C computed=$PATCH"
+          # 无条件同步 lockfile：依赖变更时由 auto-patch 自动更新并提交
+          cargo generate-lockfile
+          if [[ "$CURRENT_C" != "$PATCH" && "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
+            python scripts/sync-workspace-version.py "$NEW_VERSION"
+          fi
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add phira-mp-plus-server/Cargo.toml phira-plugin-sdk/Cargo.toml Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync version + lockfile [skip ci]"
+            git pull --rebase origin main
+            git push
+          fi
+          echo "build_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: auto-patch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.auto-patch.outputs.build_ref }}
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Workspace version consistency
+        run: python scripts/sync-workspace-version.py --check
+      - name: Check
+        run: cargo check --locked --workspace --all-targets --all-features
+      - name: Tests
+        run: cargo test --locked --workspace --all-features
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  # Windows 编译验证独立于 Linux build——失败不阻塞 build（Linux 产物照出）。
+  check-windows:
+    needs: auto-patch
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.auto-patch.outputs.build_ref }}
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-windows
+          cache-on-failure: true
+      - name: Check (Windows)
+        run: cargo check --locked --workspace --all-targets --all-features --target x86_64-pc-windows-msvc
+
+  build:
+    needs: [auto-patch, check]
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: phira-mp-plus-server-linux
+            artifact-path: target/x86_64-unknown-linux-musl/release/phira-mp-plus-server
+            setup: sudo apt-get update && sudo apt-get install -y musl-tools
+            env:
+              CC_x86_64_unknown_linux_musl: musl-gcc
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: phira-mp-plus-server-windows-x86_64
+            artifact-path: target/x86_64-pc-windows-msvc/release/phira-mp-plus-server.exe
+            setup: ""
+            env: {}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      attestations: write
+    env: ${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.auto-patch.outputs.build_ref }}
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ matrix.target }}
+          cache-on-failure: true
+      - if: matrix.setup
+        name: Setup System
+        run: ${{ matrix.setup }}
+      - name: cargo build
+        run: cargo build --locked --release --features sentry --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: error
+

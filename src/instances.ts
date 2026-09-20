@@ -117,6 +117,23 @@ export class ChartServiceInstanceRegistry {
     return owners[0] || primary;
   }
 
+  /**
+   * Record detail requests contain only a globally allocated record id. Prefer the
+   * host-selected instance, then search the remaining small instance set so PMP can
+   * retrieve a score even when it calls the shared API hostname.
+   */
+  recordById(recordId: number, host: string | undefined): Record<string, unknown> | null {
+    const primary = this.resolveForHost(host);
+    const ordered = [primary, ...this.data.instances
+      .filter(item => item.id !== primary.definition.id)
+      .map(item => this.runtime(item.id))];
+    for (const runtime of ordered) {
+      const record = runtime.records.recordById(recordId);
+      if (record) return record;
+    }
+    return null;
+  }
+
   needsViewer(): boolean { return this.data.instances.some(i => i.enabled && i.visibility?.mode === "users"); }
 
   visibleCharts(viewer: number | null, host: string | undefined): import("./private-chart").PrivateChartDefinition[] {
@@ -179,21 +196,42 @@ export class ChartServiceInstanceRegistry {
     return { ...next, hosts: [...next.hosts] };
   }
 
-  delete(id: string): boolean {
+  /** Preserves an account's instances as server-owned content when the account is deleted. */
+  releaseOwner(ownerId: number): string[] {
+    const released: string[] = [];
+    const now = new Date().toISOString();
+    this.data.instances = this.data.instances.map(definition => {
+      if (definition.ownerId !== ownerId) return definition;
+      released.push(definition.id);
+      const next = { ...definition, ownerId: null, updated: now };
+      const runtime = this.runtimes.get(definition.id);
+      if (runtime) runtime.definition = next;
+      return next;
+    });
+    if (released.length) this.save();
+    return released;
+  }
+
+  /**
+   * Removes an instance. Metadata and runtimes are updated first, then the whole
+   * instance directory is deleted asynchronously so removing a large chart set does
+   * not block the event loop.
+   */
+  async delete(id: string): Promise<boolean> {
     if (id === DEFAULT_INSTANCE_ID) throw new Error("the default instance cannot be deleted");
     const index = this.data.instances.findIndex((item) => item.id === id);
     if (index < 0) return false;
     const definition = this.data.instances[index];
+    const root = path.join(this.instanceRoot, id);
+    if (path.dirname(root) !== this.instanceRoot) throw new Error("invalid instance directory");
     this.data.instances.splice(index, 1);
     const runtime = this.runtimes.get(id);
     if (runtime) {
       runtime.records.close();
       this.runtimes.delete(id);
     }
-    const root = path.join(this.instanceRoot, id);
-    if (path.dirname(root) !== this.instanceRoot) throw new Error("invalid instance directory");
-    fs.rmSync(root, { recursive: true, force: true });
     this.save();
+    await fs.promises.rm(root, { recursive: true, force: true });
     return Boolean(definition);
   }
 

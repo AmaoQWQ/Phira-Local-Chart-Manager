@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "phira-mp-plus-server",
+    "phira-mp-plus-server-api",
+    "phira-plugin-sdk",
+    "phira-mp/phira-mp-common",
+    "phira-mp/phira-mp-macros",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[workspace.dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+flate2 = "1.1"
+tar = "0.4"
+lofty = "0.24"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }

@@ -50,17 +50,15 @@ if not exist "certs\server.key" (
 )
 
 if not "%~1"=="" set "PORT=%~1"
-if not defined PORT (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection -State Listen -LocalPort 443 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
-  if errorlevel 1 (
-    set "PORT=443"
-  ) else (
-    set "PORT=8443"
-    echo Port 443 is already in use. Using port 8443 instead.
-  )
-)
 
-echo Starting Phira API Probe on port %PORT%...
+rem Without an explicit argument, leave PORT unset so the application reads it
+rem from .env. This keeps the configured origin port stable across restarts.
+
+if defined PORT (
+  echo Starting Phira Local Chart Manager on port %PORT%...
+) else (
+  echo Starting Phira Local Chart Manager using the port configured in .env...
+)
 call npm.cmd run start:quick
 set "EXIT_CODE=%ERRORLEVEL%"
 

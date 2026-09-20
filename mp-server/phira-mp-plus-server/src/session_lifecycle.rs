@@ -1,0 +1,639 @@
+use crate::l10n::Language;
+use crate::server::PlusServerState;
+use crate::session::Session;
+use anyhow::{anyhow, Result};
+use fluent::FluentArgs;
+use phira_mp_common::{RoomEvent, ServerCommand, UserInfo};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use tokio::sync::{Mutex, RwLock};
+use tokio::time;
+use tracing::{debug, warn};
+use uuid::Uuid;
+
+/// The current transport binding for a [`User`]: the generation counter and the
+/// weak session ref live in ONE lock so a reader can never observe a session
+/// and a generation from different binds (P0-B torn read). Bumped on every bind
+/// and on clear; in-flight `CommandOrigin`s captured against an older generation
+/// are immediately stale.
+#[derive(Default)]
+pub(crate) struct SessionBinding {
+    /// Monotonic generation counter. Bumped on every bind and on clear.
+    pub generation: u64,
+    /// Weak ref to the currently bound Session.
+    pub session: Option<Weak<Session>>,
+}
+
+pub struct User {
+    pub id: i32,
+    pub name: String,
+    pub lang: Language,
+
+    pub server: Arc<PlusServerState>,
+    pub auth_token: RwLock<Option<String>>,
+    /// Atomically-bound current transport. Generation + weak ref share one lock
+    /// so no reader can observe a torn (old session, new generation) pair (P0-B).
+    pub(crate) binding: RwLock<SessionBinding>,
+    pub room: RwLock<Option<Arc<super::room::Room>>>,
+
+    pub monitor: AtomicBool,
+    pub game_time: AtomicU32,
+
+    pub dangle_mark: Mutex<Option<Arc<()>>>,
+    /// Playing 重连宽限的绝对截止时间；0 表示当前不在宽限中。
+    pub dangle_deadline_ms: AtomicI64,
+    /// “等待该玩家重连”提示在每次断线宽限中最多广播一次。
+    pub reconnect_wait_notified: AtomicBool,
+    pub admin_cli_pending: Mutex<Option<String>>,
+    /// 用户确认加入进行中游戏的房间 ID（第一次请求时设置，第二次直接加入）。
+    pub join_pending_game: RwLock<Option<String>>,
+}
+
+impl User {
+    pub fn new(
+        id: i32,
+        name: String,
+        lang: Language,
+        server: Arc<PlusServerState>,
+        auth_token: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            lang,
+
+            server,
+            auth_token: RwLock::new(auth_token),
+            binding: RwLock::default(),
+            room: RwLock::default(),
+
+            monitor: AtomicBool::default(),
+            game_time: AtomicU32::default(),
+
+            dangle_mark: Mutex::default(),
+            dangle_deadline_ms: AtomicI64::new(0),
+            reconnect_wait_notified: AtomicBool::new(false),
+            admin_cli_pending: Mutex::default(),
+            join_pending_game: RwLock::default(),
+        }
+    }
+
+    /// Current connection session id, if the session reference is still alive.
+    /// Returns an empty string when the session has already been dropped —
+    /// callers treat that as "match any session for this instance" (fallback).
+    pub async fn current_session_id(&self) -> String {
+        self.binding
+            .read()
+            .await
+            .session
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|s| s.id.to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn to_info(&self) -> UserInfo {
+        UserInfo {
+            id: self.id,
+            name: self.name.clone(),
+            monitor: self.monitor.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Send a localized system message (Message::Chat { user: 0 }) to this user.
+    /// Translates `key` with `args` into the user's language.
+    pub async fn send_system_msg(&self, key: &str, args: &FluentArgs<'_>) {
+        let content = crate::l10n::translate_system(&self.lang, key, args);
+        self.try_send(
+            ServerCommand::Message(phira_mp_common::Message::Chat {
+                user: 0,
+                content,
+            }),
+            // 系统消息非状态事件，cutover 不适用。
+            None,
+        )
+        .await;
+    }
+
+    /// Send a localized system message with no args.
+    pub async fn send_system_msg_simple(&self, key: &str) {
+        let args = FluentArgs::new();
+        self.send_system_msg(key, &args).await;
+    }
+
+    /// Atomically bind `session` as the current transport. Bumps the generation
+    /// in the same critical section and returns the generation assigned to this
+    /// Session (the caller stores it on the Session as its bound generation, P0-A).
+    pub async fn set_session(&self, session: Weak<Session>) -> u64 {
+        let mut binding = self.binding.write().await;
+        binding.generation += 1;
+        binding.session = Some(session);
+        *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
+        binding.generation
+    }
+
+    /// Atomically clear the current transport (shutdown/kick). Bumps generation
+    /// so any in-flight origin captured against the previous binding dies.
+    pub async fn clear_session(&self) {
+        let mut binding = self.binding.write().await;
+        binding.generation += 1;
+        binding.session = None;
+        *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
+    }
+
+    /// PMP44 P0-C / PMP45 P0-C: 只清除与给定 `session_id` + `generation` 完全匹配的
+    /// 当前绑定。认证回滚、断连与清理必须只作用于精确代际，绝不清除更新的
+    /// Session（审计 §7）。返回是否实际清除了绑定。
+    pub async fn clear_session_if_matches(&self, session_id: Uuid, generation: u64) -> bool {
+        let mut binding = self.binding.write().await;
+        if binding.generation != generation {
+            return false;
+        }
+        let bound_id = binding
+            .session
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .map(|s| s.id);
+        if bound_id != Some(session_id) {
+            return false;
+        }
+        binding.generation += 1;
+        binding.session = None;
+        *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
+        true
+    }
+
+    /// PMP46 Blocker 1: 恢复旧绑定到精确 (session, generation) 代际。仅用于
+    /// 失败重连回滚：B 认证失败后把 User 绑定恢复为 A + previous_generation，
+    /// 使 A 的命令 origin 判定（A.bound_generation == binding.generation）
+    /// 重新成立，避免 A 变成"物理存活但逻辑 stale"的僵尸连接。
+    ///
+    /// 与 `set_session` 不同，这里不 bump generation——必须把代际精确恢复到
+    /// A 认证时的 `prev_gen`，否则 A 的 origin 快照（A.bound_generation）会
+    /// 与新的 binding.generation 失配而被误判为 stale（方案 A）。
+    pub async fn restore_binding(&self, session: Weak<Session>, generation: u64) {
+        let mut binding = self.binding.write().await;
+        binding.session = Some(session);
+        binding.generation = generation;
+        *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
+    }
+
+    /// PMP47 A 原子加固: 在**单一写锁内**完成「检查并替换」绑定。
+    ///
+    /// 仅当当前绑定仍精确等于 `old_session_id + old_generation`（即失败的 B
+    /// 仍是当前绑定，没有被更新的 C 接管）时，原子替换为
+    /// `new_session + new_generation`（恢复旧 A），返回 `true`；否则不修改任何
+    /// 状态，返回 `false`（更新的 C 胜出，绝不覆盖更年轻的绑定）。
+    ///
+    /// 消除了 PMP46 `clear_session_if_matches`（清除 B）与 `restore_binding`
+    /// （恢复 A）两个独立写锁之间的竞态窗口：两锁之间若有新认证 C 接管，旧
+    /// 实现会在第二个锁里盲目覆盖 C。
+    ///
+    /// 与 `restore_binding` 一样不 bump generation——必须把代际精确恢复到 A 的
+    /// `prev_generation`，A 的命令 origin 判定（A.bound_generation ==
+    /// binding.generation）才重新成立。
+    pub async fn replace_binding_if_matches(
+        &self,
+        old_session_id: Uuid,
+        old_generation: u64,
+        new_session: Weak<Session>,
+        new_generation: u64,
+    ) -> bool {
+        let mut binding = self.binding.write().await;
+        if binding.generation != old_generation {
+            return false;
+        }
+        let bound_id = binding
+            .session
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .map(|s| s.id);
+        if bound_id != Some(old_session_id) {
+            return false;
+        }
+        binding.session = Some(new_session);
+        binding.generation = new_generation;
+        *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
+        true
+    }
+
+    /// Capture the current session as a [`CommandOrigin`]: a snapshot of the
+    /// session identity plus its generation counter. Commands routed through the
+    /// mailbox are bound to this origin, so after a reconnect their responses,
+    /// error closes and post-response compensations can never be delivered to —
+    /// or close — the *new* session (P0-A).
+    pub async fn current_origin(&self) -> Option<crate::session::CommandOrigin> {
+        let binding = self.binding.read().await;
+        let session = binding.session.as_ref()?.upgrade()?;
+        Some(crate::session::CommandOrigin {
+            session: Arc::downgrade(&session),
+            generation: binding.generation,
+        })
+    }
+
+    pub async fn set_auth_token(&self, token: Option<String>) {
+        *self.auth_token.write().await = token;
+    }
+
+    pub async fn auth_token(&self) -> Option<String> {
+        self.auth_token.read().await.clone()
+    }
+
+    pub fn auth_token_sync(&self) -> Option<String> {
+        self.auth_token
+            .try_read()
+            .ok()
+            .and_then(|token| token.clone())
+    }
+
+    /// `room_seq` 是产生该事件时 Room Actor 的权威状态事件序号（PMP47 B：事件
+    /// 产生时绑定，随出站条目携带，而非出站消费时读共享镜像）。非房间来源或
+    /// 非状态事件（命令响应/Chat/遥测）传 `None`。
+    pub async fn try_send(&self, cmd: ServerCommand, room_seq: Option<u64>) {
+        if let Some(session) = self
+            .binding
+            .read()
+            .await
+            .session
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
+            session.try_send(cmd, room_seq).await;
+        } else {
+            warn!("sending {:?} to dangling user {}", cmd, self.id);
+        }
+    }
+
+    /// Send a command to this user's session, waiting for capacity (async).
+    /// Returns an error if there is no session or the send queue is closed.
+    pub async fn send(&self, cmd: ServerCommand, room_seq: Option<u64>) -> Result<()> {
+        match self
+            .binding
+            .read()
+            .await
+            .session
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
+            Some(session) => session.send(cmd, room_seq).await,
+            None => Err(anyhow!("no session for user {}", self.id)),
+        }
+    }
+
+    /// Send a command and block until it has been flushed to the socket
+    /// (P0-E/P0-F). Used by critical responses such as JoinRoom(Ok) where the
+    /// server must prove the packet reached the wire before committing the
+    /// caller's room state, or roll the state back.
+    ///
+    /// Origin-free variant: the client-initiated join path sends through
+    /// `CommandOrigin::send_and_flush` (bound to the originating session); the
+    /// admin force-move path (`force_move_user_to_room`) uses this method to
+    /// flush `JoinRoom(Ok)` to the transferred user's current session so the
+    /// join notification is guaranteed on the wire, never dropped by a
+    /// best-effort `try_send`.
+    pub async fn send_and_flush(&self, cmd: ServerCommand) -> Result<()> {
+        match self
+            .binding
+            .read()
+            .await
+            .session
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
+            Some(session) => session.send_and_flush(cmd).await,
+            None => Err(anyhow!("no session for user {}", self.id)),
+        }
+    }
+
+    pub async fn dangle(self: Arc<Self>, disconnected_session_id: Uuid) {
+        warn!(user = self.id, session = %disconnected_session_id, "user dangling");
+
+        // 断开连接：若在房间则累计在房游玩时长（幂等，RemoveUser 也会调用）。
+        crate::internal_hooks::playtime_disconnect(self.id, &self.server);
+
+        // Normal-user registration and disconnect finalization share one gate.
+        // This prevents a reconnect from racing an offline transition.
+        let registration_guard = if self.id >= 0 {
+            Some(self.server.user_registration_gate.lock().await)
+        } else {
+            None
+        };
+        let is_current_session = self
+            .binding
+            .read()
+            .await
+            .session
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|session| session.id == disconnected_session_id);
+        if !is_current_session {
+            debug!(
+                user = self.id,
+                session = %disconnected_session_id,
+                "ignoring stale disconnect after transport replacement"
+            );
+            return;
+        }
+
+        let room = self.room.read().await.as_ref().map(Arc::clone);
+
+        // Monitor sessions are transient and never enter the player lifecycle.
+        if self.id < 0 {
+            if let Some(room) = room {
+                if room.on_user_leave(&self).await {
+                    self.server.rooms.write().await.remove(&room.id);
+                }
+            }
+            let mut users = self.server.users.write().await;
+            if users
+                .get(&self.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self))
+            {
+                users.remove(&self.id);
+            }
+            drop(users);
+            let mut monitors = self.server.game_monitors.write().await;
+            if monitors
+                .get(&self.id)
+                .and_then(Weak::upgrade)
+                .is_some_and(|session| Arc::ptr_eq(&session.user, &self))
+            {
+                monitors.remove(&self.id);
+            }
+            return;
+        }
+
+        if let Some(room) = room.as_ref() {
+            let is_playing = room.server.upgrade()
+                .and_then(|s| s.room_snapshot(&room.id.to_string()))
+                .map(|snap| matches!(snap.stripped, phira_mp_common::StrippedRoomState::Playing))
+                .unwrap_or(false);
+            if is_playing {
+                let grace_secs = self.server.config.idle.playing_reconnect_grace_secs;
+                if grace_secs > 0 {
+                    warn!(
+                        user = self.id,
+                        grace_secs,
+                        "lost connection while playing; reconnect grace started"
+                    );
+                    // Playing reconnect grace: keep room membership, use playing-specific timer.
+                    let dangle_mark = Arc::new(());
+                    *self.dangle_mark.lock().await = Some(Arc::clone(&dangle_mark));
+                    self.dangle_deadline_ms.store(
+                        crate::db::now_ms() + grace_secs as i64 * 1000,
+                        Ordering::Release,
+                    );
+                    self.reconnect_wait_notified.store(false, Ordering::Release);
+                    drop(registration_guard);
+
+                    self.server
+                        .publish_user_disconnected(self.id, self.name.clone())
+                        .await;
+
+                    let weak_self = Arc::downgrade(&self);
+                    crate::supervisor_actor::spawn_named(
+                        format!("playing-grace-{}", self.id),
+                        async move {
+                            time::sleep(Duration::from_secs(grace_secs)).await;
+                            let Some(self_) = weak_self.upgrade() else { return };
+                            let registration_guard = self_.server.user_registration_gate.lock().await;
+                            let expired = {
+                                let mut current = self_.dangle_mark.lock().await;
+                                if current.as_ref().is_some_and(|mark| Arc::ptr_eq(mark, &dangle_mark)) {
+                                    current.take();
+                                    true
+                                } else { false }
+                            };
+                            if !expired { return; }
+                            self_.dangle_deadline_ms.store(0, Ordering::Release);
+
+                            // Grace expired — abort game, remove from room.
+                            let room = self_.room.read().await.as_ref().map(Arc::clone);
+                            if let Some(room) = room {
+                                let room_id = room.id.clone();
+                                // Abort the player's game if room still exists
+                                if let Some(server) = room.server.upgrade() {
+                                    let _ = server.room_commands.abort_round(
+                                        &server, &room_id.to_string(), self_.id, None, None,
+                                    ).await;
+                                }
+                                let _ = self_.server.room_commands.remove_user(
+                                    &self_.server,
+                                    &room_id.to_string(),
+                                    self_.id,
+                                    None,
+                                    None,
+                                ).await;
+                            }
+                            let mut users = self_.server.users.write().await;
+                            if users.get(&self_.id).is_some_and(|current| Arc::ptr_eq(current, &self_)) {
+                                users.remove(&self_.id);
+                            }
+                            drop(users);
+                            self_.server.note_user_offline().await;
+                            drop(registration_guard);
+                            // Use the fixed session id captured at disconnect
+                            // entry — re-reading the weak ref could return a NEW
+                            // session's id after a reconnect (P0-C).
+                            let sid = disconnected_session_id.to_string();
+                            let _ = self_.server.persistence_worker.enqueue(
+                                crate::persistence::message::PersistenceEvent::UserDisconnect {
+                                    user_id: self_.id,
+                                    user_name: self_.name.clone(),
+                                    server_instance_id: crate::server_instance::current().to_string(),
+                                    session_id: sid.clone(),
+                                    occurred_at: crate::db::now_ms(),
+                                },
+                            ).await;
+                            let _ = self_.server.persistence_worker.enqueue(
+                                crate::persistence::message::PersistenceEvent::UserOffline {
+                                    user_id: self_.id,
+                                    server_instance_id: crate::server_instance::current().to_string(),
+                                    session_id: sid,
+                                    occurred_at: crate::db::now_ms(),
+                                },
+                            ).await;
+                        },
+                    );
+                    return;
+                } else {
+                    warn!(
+                        user = self.id,
+                        "lost connection while playing; removing immediately (grace disabled)"
+                    );
+                    let room_id = room.id.clone();
+                    let was_monitor = self.monitor.load(Ordering::Relaxed);
+                    if room.on_user_leave(&self).await {
+                        self.server.rooms.write().await.remove(&room_id);
+                    }
+                    let mut users = self.server.users.write().await;
+                    if users
+                        .get(&self.id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &self))
+                    {
+                        users.remove(&self.id);
+                    }
+                    drop(users);
+                    self.server.note_user_offline().await;
+                    drop(registration_guard);
+
+                    if !was_monitor {
+                        self.server
+                            .publish_room_event(RoomEvent::LeaveRoom {
+                                room: room_id,
+                                user: self.id,
+                            })
+                            .await;
+                    }
+                    self.server
+                        .publish_user_disconnected(self.id, self.name.clone())
+                        .await;
+                    let sid = disconnected_session_id.to_string();
+                    if let Err(e) = self
+                        .server
+                        .persistence_worker
+                        .enqueue(
+                            crate::persistence::message::PersistenceEvent::UserDisconnect {
+                                user_id: self.id,
+                                user_name: self.name.clone(),
+                                server_instance_id: crate::server_instance::current().to_string(),
+                                session_id: sid.clone(),
+                                occurred_at: crate::db::now_ms(),
+                            },
+                        )
+                        .await
+                    {
+                        warn!(user = self.id, kind = %e.kind(), "UserDisconnect enqueue failed");
+                    }
+                    if let Err(e) = self
+                        .server
+                        .persistence_worker
+                        .enqueue(crate::persistence::message::PersistenceEvent::UserOffline {
+                            user_id: self.id,
+                            server_instance_id: crate::server_instance::current().to_string(),
+                            session_id: sid,
+                            occurred_at: crate::db::now_ms(),
+                        })
+                        .await
+                    {
+                        warn!(user = self.id, kind = %e.kind(), "UserOffline enqueue failed");
+                    }
+                    return;
+                }
+            }
+        }
+
+        let dangle_mark = Arc::new(());
+        *self.dangle_mark.lock().await = Some(Arc::clone(&dangle_mark));
+        drop(registration_guard);
+
+        self.server
+            .publish_user_disconnected(self.id, self.name.clone())
+            .await;
+        if let Err(e) = self
+            .server
+            .persistence_worker
+            .enqueue(
+                crate::persistence::message::PersistenceEvent::UserDisconnect {
+                    user_id: self.id,
+                    user_name: self.name.clone(),
+                    server_instance_id: crate::server_instance::current().to_string(),
+                    session_id: disconnected_session_id.to_string(),
+                    occurred_at: crate::db::now_ms(),
+                },
+            )
+            .await
+        {
+            warn!(user = self.id, kind = %e.kind(), "UserDisconnect enqueue failed after dangle");
+        }
+
+        // The grace closure uses the fixed `disconnected_session_id` param
+        // captured at disconnect entry, so a stale offline event can never
+        // match a NEWER session after a reconnect (P0-C).
+        let weak_self = Arc::downgrade(&self);
+        let grace_secs = self.server.config.idle.dangle_grace_secs.max(5);
+        crate::supervisor_actor::spawn_named(format!("dangle-grace-{}", self.id), async move {
+            time::sleep(Duration::from_secs(grace_secs)).await;
+            let Some(self_) = weak_self.upgrade() else {
+                return;
+            };
+            let registration_guard = self_.server.user_registration_gate.lock().await;
+            let expired = {
+                let mut current = self_.dangle_mark.lock().await;
+                if current
+                    .as_ref()
+                    .is_some_and(|mark| Arc::ptr_eq(mark, &dangle_mark))
+                {
+                    current.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if !expired {
+                return;
+            }
+
+            let room = self_.room.read().await.as_ref().map(Arc::clone);
+            let mut room_leave_event = None;
+            if let Some(room) = room {
+                let room_id = room.id.clone();
+                let was_monitor = self_.monitor.load(Ordering::Relaxed);
+                let _ = self_.server.room_commands.remove_user(
+                    &self_.server,
+                    &room_id.to_string(),
+                    self_.id,
+                    None,
+                    None,
+                ).await;
+                if !was_monitor {
+                    room_leave_event = Some(RoomEvent::LeaveRoom {
+                        room: room_id,
+                        user: self_.id,
+                    });
+                }
+            }
+
+            let mut users = self_.server.users.write().await;
+            if users
+                .get(&self_.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self_))
+            {
+                users.remove(&self_.id);
+            }
+            drop(users);
+            self_.server.note_user_offline().await;
+            drop(registration_guard);
+
+            if let Some(event) = room_leave_event {
+                self_.server.publish_room_event(event).await;
+            }
+            // Use the session id captured at disconnect entry (fixed), not a
+            // re-read of the (possibly-dead) weak ref.
+            if let Err(e) = self_
+                .server
+                .persistence_worker
+                .enqueue(crate::persistence::message::PersistenceEvent::UserOffline {
+                    user_id: self_.id,
+                    server_instance_id: crate::server_instance::current().to_string(),
+                    session_id: disconnected_session_id.to_string(),
+                    occurred_at: crate::db::now_ms(),
+                })
+                .await
+            {
+                warn!(user = self_.id, kind = %e.kind(), "UserOffline enqueue failed in dangle grace");
+            }
+        });
+    }
+}

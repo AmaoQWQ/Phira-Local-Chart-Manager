@@ -1,8 +1,8 @@
 {
-  "name": "phira-api-probe",
+  "name": "phira-local-chart-manager",
   "version": "0.1.0",
   "private": true,
-  "description": "Independent HTTPS API Gateway for Phira official API forwarding and private chart testing.",
+  "description": "Local chart, score, and multiplayer management system for Phira.",
   "type": "commonjs",
   "engines": {
     "node": ">=22.5"
@@ -10,12 +10,21 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "start:quick": "node scripts/process-control.js start",
-    "stop": "node scripts/process-control.js stop",
+    "start:quick": "node scripts/pmp-process-control.js start && node scripts/process-control.js start",
+    "start:gateway": "node scripts/process-control.js start",
+    "start:pmp": "node scripts/pmp-process-control.js start",
+    "stop": "node scripts/process-control.js stop && node scripts/pmp-process-control.js stop",
+    "stop:gateway": "node scripts/process-control.js stop",
+    "stop:pmp": "node scripts/pmp-process-control.js stop",
+    "status:pmp": "node scripts/pmp-process-control.js status",
     "test:multiplayer": "npm run build && node scripts/test-multiplayer.js",
     "test:rating": "npm run build && node scripts/test-private-rating.js",
     "test:instances": "npm run build && node scripts/test-instances.js",
     "test:visibility": "npm run build && node scripts/test-instance-visibility.js",
+    "test:policy": "npm run build && node scripts/test-admin-policy.js",
+    "test:monitor": "npm run build && node scripts/test-monitor-preview.js",
+    "test:rooms": "npm run build && node scripts/test-monitor-rooms.js",
+    "build:renderer": "node scripts/build-renderer.js",
     "analyze:private-tokens": "node scripts/analyze-private-tokens.js",
     "dev": "tsx watch src/index.ts",
     "cert:generate": "node scripts/generate-cert.js"

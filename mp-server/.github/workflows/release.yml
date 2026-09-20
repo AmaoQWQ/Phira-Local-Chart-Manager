@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      description:
+        description: 版本说明（可选）
+        type: string
+        default: ""
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          FULL_VERSION=$(grep '^version = ' phira-mp-plus-server/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          python scripts/sync-workspace-version.py --check "$FULL_VERSION"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME}" != "v$FULL_VERSION" ]]; then
+            echo "release tag ${GITHUB_REF_NAME} does not match Cargo version v$FULL_VERSION" >&2
+            exit 1
+          fi
+          echo "tag=v$FULL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$FULL_VERSION" >> "$GITHUB_OUTPUT"
+
+  quality-gate:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-quality
+          cache-on-failure: true
+      - name: Workspace version consistency
+        run: python scripts/sync-workspace-version.py --check
+      - name: Check
+        run: cargo check --locked --workspace --all-targets --all-features
+      - name: Tests
+        run: cargo test --locked --workspace --all-features
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  build:
+    needs: [version, quality-gate]
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact-name: phira-mp-plus-server-linux-musl
+            artifact-path: target/x86_64-unknown-linux-musl/release/phira-mp-plus-server
+            setup: sudo apt-get update && sudo apt-get install -y musl-tools
+            env:
+              CC_x86_64_unknown_linux_musl: musl-gcc
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact-name: phira-mp-plus-server-linux-arm64-musl
+            artifact-path: target/aarch64-unknown-linux-musl/release/phira-mp-plus-server
+            setup: sudo apt-get update && sudo apt-get install -y musl-tools
+            env:
+              CC_aarch64_unknown_linux_musl: musl-gcc
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+              # aarch64 上 GCC 默认用 outline atomics（LSE），链接引用 getauxval
+              # 而 musl 无此符号 → jemalloc configure 原子测试失败。禁用它。
+              CFLAGS: -mno-outline-atomics
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact-name: phira-mp-plus-server-windows-x86_64
+            artifact-path: target/x86_64-pc-windows-msvc/release/phira-mp-plus-server.exe
+            setup: ""
+            env: {}
+    runs-on: ${{ matrix.os }}
+    env: ${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+          cache-on-failure: true
+      - if: matrix.setup
+        name: Install system dependencies
+        run: ${{ matrix.setup }}
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - run: cp ${{ matrix.artifact-path }} ${{ matrix.artifact-name }}
+      - name: Smoke test (linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          chmod +x ${{ matrix.artifact-name }}
+          ./${{ matrix.artifact-name }} --version
+      - name: Verify linux-musl is statically linked
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          if file ${{ matrix.artifact-name }} | grep -qi static; then
+            echo "musl 构建确认为静态链接（旧 glibc 服务器可运行）"
+          else
+            echo "::error::musl 构建并非静态链接，在旧 glibc 服务器将无法运行"
+            file ${{ matrix.artifact-name }}
+            exit 1
+          fi
+      - name: Generate provenance
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ matrix.artifact-name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-name }}
+          if-no-files-found: error
+
+  package-sdk:
+    needs: [version, quality-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 打包 SDK + WIT
+        run: |
+          set -euo pipefail
+          mkdir -p _sdk
+          cp -r phira-plugin-sdk _sdk/phira-plugin-sdk
+          cp -r wit _sdk/wit
+          cd _sdk && tar czf ../phira-plugin-sdk.tar.gz phira-plugin-sdk wit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phira-plugin-sdk
+          path: phira-plugin-sdk.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, quality-gate, build, package-sdk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: phira-*
+          merge-multiple: true
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo install cargo-cyclonedx --locked || echo "cargo-cyclonedx install failed"
+          cargo cyclonedx --output-format json 2>/dev/null || echo "SBOM generation skipped"
+          ls -la *.cdx.json 2>/dev/null && echo "SBOM generated" || echo "No SBOM file"
+      - name: Generate release checksums
+        run: |
+          sha256sum \
+            phira-mp-plus-server-linux-musl \
+            phira-mp-plus-server-linux-arm64-musl \
+            phira-mp-plus-server-windows-x86_64 \
+            phira-plugin-sdk.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: v${{ needs.version.outputs.version }}
+          body: ${{ github.event.inputs.description }}
+          files: |
+            phira-mp-plus-server-linux-musl
+            phira-mp-plus-server-linux-arm64-musl
+            phira-mp-plus-server-windows-x86_64
+            phira-plugin-sdk.tar.gz
+            SHA256SUMS
+          prerelease: false

@@ -1,0 +1,177 @@
+//! User disconnection and kick methods.
+
+use phira_mp_common::{RoomEvent, ServerCommand};
+use serde_json::Value;
+use std::sync::Arc;
+use tracing::{info, warn};
+
+use super::state::PlusServerState;
+
+impl PlusServerState {
+    /// If the banned user is currently online, deliver the localized reason before
+    /// closing the session. Returning `true` means an active session was found.
+    pub async fn disconnect_banned_user(&self, user_id: i32, reason: &str) -> bool {
+        let target = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .find(|(_, session)| session.user.id == user_id)
+                .map(|(session_id, session)| (*session_id, Arc::clone(session)))
+        };
+        let Some((session_id, session)) = target else {
+            return false;
+        };
+
+        let language = session.user.lang.0.to_string();
+        let message = crate::session_auth::ban_rejection_message(&language, reason);
+        // Send a chat message so the client visibly displays the ban reason,
+        // not just a silent Authenticate error they may not handle mid-session.
+        let _ = session
+            .stream
+            .send_and_flush(ServerCommand::Message(phira_mp_common::Message::Chat {
+                user: 0,
+                content: message.clone(),
+            }))
+            .await;
+
+        session.stream.close();
+        if let Err(err) = self.lost_con_tx.send(session_id).await {
+            warn!(user = user_id, ?err, "failed to disconnect banned user");
+        }
+        true
+    }
+}
+
+/// 从房间踢出用户。
+pub(crate) async fn run_admin_kick_user(
+    state: &PlusServerState,
+    target_id: i32,
+    reason: &str,
+) -> Result<Value, String> {
+    // Serialize against authentication/reconnect finalization so the old
+    // transport cannot race with a replacement and reinsert stale presence.
+    let registration_guard = state.user_registration_gate.lock().await;
+    let user = state
+        .users
+        .read()
+        .await
+        .get(&target_id)
+        .map(Arc::clone)
+        .ok_or("user not found")?;
+
+    if let Some(room) = user.room.read().await.as_ref().map(Arc::clone) {
+        let room_id = room.id.to_string();
+        let room_key = room.id.clone();
+        let was_monitor = user.monitor.load(std::sync::atomic::Ordering::SeqCst);
+        if room.on_user_leave(&user).await {
+            state.rooms.write().await.remove(&room_key);
+        }
+        if !was_monitor {
+            state
+                .publish_room_event(RoomEvent::LeaveRoom {
+                    room: room_key,
+                    user: target_id,
+                })
+                .await;
+        }
+        state
+            .dispatch_plugin_event(crate::plugin::PluginEvent::RoomLeave {
+                user_id: target_id,
+                room_id,
+            })
+            .await;
+    }
+
+    let target_session = {
+        let mut sessions = state.sessions.write().await;
+        let session_id = sessions
+            .iter()
+            .find(|(_, session)| session.user.id == target_id)
+            .map(|(id, _)| *id);
+        session_id.and_then(|id| sessions.remove(&id))
+    };
+    // Capture the session id BEFORE clearing the user's session ref below, so
+    // the kick's offline/disconnect events can strictly target this session
+    // (P0-E: strict session generation).
+    let disconnected_session_id = target_session
+        .as_ref()
+        .map(|s| s.id.to_string())
+        .unwrap_or_default();
+
+    // Make the eventual transport-lost notification stale before closing.
+    user.clear_session().await;
+    let mut users = state.users.write().await;
+    if users
+        .get(&target_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &user))
+    {
+        users.remove(&target_id);
+    }
+    drop(users);
+    drop(registration_guard);
+
+    state.note_user_offline().await;
+
+    if let Some(session) = target_session {
+        let mut args = fluent::FluentArgs::new();
+        args.set("reason", reason);
+        let content = crate::l10n::translate_system(
+            &session.user.lang, "kicked-by-admin", &args,
+        );
+        let message = ServerCommand::Message(phira_mp_common::Message::Chat {
+            user: 0,
+            content,
+        });
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            session.stream.send_and_flush(message),
+        )
+        .await;
+        session.stream.close();
+    }
+
+    info!(user = target_id, reason = %reason, "kicked from server by admin");
+    state
+        .publish_user_disconnected(target_id, user.name.clone())
+        .await;
+    if let Err(e) = state
+        .persistence_worker
+        .enqueue(
+            crate::persistence::message::PersistenceEvent::UserDisconnect {
+                user_id: target_id,
+                user_name: user.name.clone(),
+                server_instance_id: crate::server_instance::current().to_string(),
+                session_id: disconnected_session_id.clone(),
+                occurred_at: crate::db::now_ms(),
+            },
+        )
+        .await
+    {
+        warn!(user = target_id, kind = %e.kind(), "UserDisconnect enqueue failed during kick");
+    }
+    if let Err(e) = state
+        .persistence_worker
+        .enqueue(crate::persistence::message::PersistenceEvent::UserOffline {
+            user_id: target_id,
+            server_instance_id: crate::server_instance::current().to_string(),
+            session_id: disconnected_session_id.clone(),
+            occurred_at: crate::db::now_ms(),
+        })
+        .await
+    {
+        warn!(user = target_id, kind = %e.kind(), "UserOffline enqueue failed during kick");
+    }
+
+    Ok(serde_json::json!({"ok": true, "reason": reason}))
+}
+
+impl PlusServerState {
+    /// 每次玩家从 `users` 表移除后调用：若已无真实玩家（id>0），
+    /// 刷新 `last_all_offline_at`。自动更新据此判定空闲时长（min_idle_minutes）。
+    pub async fn note_user_offline(&self) {
+        let has_players = self.users.read().await.values().any(|u| u.id > 0);
+        if !has_players {
+            *self.last_all_offline_at.lock().await = std::time::Instant::now();
+        }
+    }
+}

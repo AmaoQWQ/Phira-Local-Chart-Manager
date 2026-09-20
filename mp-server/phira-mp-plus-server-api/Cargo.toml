@@ -1,0 +1,13 @@
+[package]
+name = "phira-mp-plus-server-api"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# openssl was declared but is referenced nowhere in this crate (or anywhere else in the
+# workspace); with the `vendored` feature it forced a full OpenSSL source build on every
+# platform, which fails on Windows without perl. Removed for the local Windows build test.
+# openssl = { version = "0.10", features = ["vendored"] }
