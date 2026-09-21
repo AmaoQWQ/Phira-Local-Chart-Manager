@@ -683,6 +683,19 @@ function makeRequestHandler(
           }
           return;
         }
+        // Printable HTML view of the same document. Unlike the PDF export it needs no
+        // local Chromium, so a fresh clone can always produce a document.
+        const printMatch = /^\/api\/admin\/docs\/(user|api|readme)\/print$/.exec(requestUrl.pathname);
+        if (printMatch && method === "GET") {
+          const documentId = printMatch[1];
+          try {
+            const markdown = fs.readFileSync(documentFilePath(config, documentId), "utf8");
+            html(response, documentPdfHtml({ title: DOC_PDF_TITLES[documentId], source: markdown }));
+          } catch {
+            json(response, { error: "document not found" }, 404);
+          }
+          return;
+        }
         const pdfMatch = /^\/api\/admin\/docs\/(user|api|readme)\/pdf$/.exec(requestUrl.pathname);
         if (pdfMatch && method === "GET") {
           const documentId = pdfMatch[1];
