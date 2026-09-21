@@ -947,15 +947,22 @@ function makeRequestHandler(
           const highRisk = operations.some(p => ["高", "极高"].includes(PERMISSIONS.find(item => item[0] === p)![2]));
           if (target && target.ownerId !== identity.user.id && highRisk) reason = accounts.reason(reason);
           if (operations.includes("instance.delete") && request.headers["x-admin-confirm"] !== targetId || operations.includes("chart.purge") && request.headers["x-admin-confirm"] !== "delete") throw new AdminError(422, "请确认删除范围后再提交");
-          const auditId = targetId || String(parsedInput.id || "");
-          const initial = instanceRegistry?.get(auditId) ? instanceRegistry.runtime(auditId) : null;
+          // The audited instance is selected by the path, never by the request body: the
+          // collection route carries no permission-checked target, so a body-supplied id would
+          // let any member snapshot an instance they may not read, and /api/admin/audit hands a
+          // row back to whoever the row names as its owner. A creation has no previous state
+          // either, so its "before" stays empty and only an instance this actor ends up owning
+          // is recorded.
+          const scopedId = targetId || null;
+          const requestedId = instancesEndpoint && !scopedId ? String(parsedInput.id ?? "").trim().toLocaleLowerCase() : null;
+          const initial = scopedId && instanceRegistry?.get(scopedId) ? instanceRegistry.runtime(scopedId) : null;
           const initialChartIds = new Set(initial?.charts.list().map(c => c.id));
           // Record ids are assigned in increasing order, so the highest id before the
           // request identifies everything the request creates without reading the table.
           const initialRecordId = initial ? initial.records.maxRecordId() : 0;
-          const snapshot = () => {
-            const item = instanceRegistry?.get(auditId); if (!item) return null;
-            const rt = instanceRegistry!.runtime(auditId), charts = rt.charts.list();
+          const snapshot = (id: string) => {
+            const item = instanceRegistry?.get(id); if (!item) return null;
+            const rt = instanceRegistry!.runtime(id), charts = rt.charts.list();
             const chartMatch = /^\/api\/admin\/charts\/(-?\d+)$/.exec(route), recordMatch = /^\/api\/admin\/records\/(-?\d+)$/.exec(route);
             const relevantCharts = chartMatch ? charts.filter(c => c.id === Number(chartMatch[1])) : route === "/api/admin/charts" && method === "POST" ? charts.filter(c => !initialChartIds.has(c.id)) : charts;
             // Audit details stay bounded: totals come from COUNT and at most 501 rows are
@@ -969,11 +976,16 @@ function makeRequestHandler(
               detailsTruncated: relevantCharts.length > 500 || relevantRecords.length > 500,
               charts: relevantCharts.slice(0, 500).map(c => ({ id: c.id, name: c.name, level: c.level, difficulty: c.difficulty, charter: c.charter, composer: c.composer, illustrator: c.illustrator, description: c.description, tags: c.tags, listed: c.listed })), records: relevantRecords.slice(0, 500).map(r => ({ id: r.id, chart: r.chart, player: r.player, score: r.score, accuracy: r.accuracy })) };
           };
-          const before = snapshot(), actor = identity.user.id, owner = target?.ownerId ?? actor;
+          const actor = identity.user.id;
+          const before = scopedId ? snapshot(scopedId) : {};
+          const owner = scopedId ? (instanceRegistry?.get(scopedId)?.ownerId ?? actor) : null;
           const end = response.end.bind(response);
           response.end = ((...args: Parameters<typeof response.end>) => {
             response.end = end;
-            accounts.audit(actor, auditId, owner, method + " " + route, route, reason, before, snapshot(), response.statusCode < 400 ? "success" : "failed");
+            const created = requestedId ? instanceRegistry?.get(requestedId) ?? null : null;
+            const owned = created && (created.ownerId ?? null) === actor ? created : null;
+            const after = scopedId ? snapshot(scopedId) : owned ? snapshot(owned.id) : {};
+            accounts.audit(actor, scopedId ?? owned?.id ?? null, scopedId ? owner : owned?.ownerId ?? null, method + " " + route, route, reason, before, after, response.statusCode < 400 ? "success" : "failed");
             return end(...args);
           }) as typeof response.end;
         }

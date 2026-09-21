@@ -54,6 +54,18 @@ async function main(){
     assert.equal((await api('users/'+other.user.id+'/review','POST',{revision:1,decision:'approved'},staff)).status,403);
     const audit=await api('audit','GET',undefined,staff);assert.equal(audit.status,200);assert.ok(audit.data.events.every(e=>e.instanceId!==null),'Members must not receive application or permission audit records');
   }
+  // Regression: the collection route carries no path-scoped instance, so an id in the body must
+  // never select what the audit row snapshots or names as its owner. A rejected creation used to
+  // record the named instance with the caller as owner, and auditPage returns a row to its owner,
+  // which handed any member another instance's hosts, charts and scores.
+  await configure(staff,'ordinary',[]);
+  const auditBefore=(await api('audit','GET',undefined,staff)).data.events;
+  assert.equal((await api('instances','POST',{id:'owner-a'},staff)).status,409,'An existing instance id must be rejected');
+  const auditAfter=(await api('audit','GET',undefined,staff)).data.events;
+  assert.equal(auditAfter.length,auditBefore.length,'A rejected collection-path creation must not add a readable audit event');
+  assert.ok(auditAfter.every(e=>e.instanceId!=='owner-a'),'A body-supplied instance id must not reach a member audit trail');
+  assert.equal((await api('instances','POST',{id:'staff-own',name:'Staff own'},staff)).status,201,'A member may still create their own instance');
+  assert.ok((await api('audit','GET',undefined,staff)).data.events.some(e=>e.instanceId==='staff-own'),'A member must still see the audit of the instance they created');
   assert.equal((await configure(staff,'super')).status,422);
   assert.equal((await configure(staff,'constructor')).status,422);
   assert.equal((await configure(staff,'advanced',['missing'])).status,422);
