@@ -175,6 +175,84 @@ Windows PowerShell 可将下面的 `npm` 换成 `npm.cmd`。
 
 Phira 客户端的具体接入方式取决于所使用的客户端版本和部署域名。服务器所有者应向玩家提供最终域名、证书要求和多人服务器地址。
 
+## 安装谱面预览功能
+
+谱面预览是管理面板中的可选功能。安装后，拥有谱面查看权限的成员可以在“谱面”页面点击“预览”，直接在浏览器中播放自动演示、拖动进度和调整音量。
+
+这个功能由两部分组成：
+
+- 编译成 WebAssembly 的 `phira-web-monitor` 浏览器渲染器
+- 将 `.pez` 转换为渲染数据的本机 `chart-compiler`
+
+二者都需要在部署机器上构建。构建产物不会提交到 GitHub。
+
+### 1. 安装构建工具
+
+先安装 [Rustup](https://rustup.rs/)，然后确认以下命令可以运行：
+
+```powershell
+rustc --version
+cargo --version
+```
+
+再安装 `wasm-pack`：
+
+```powershell
+cargo install wasm-pack
+wasm-pack --version
+```
+
+Windows 如果提示缺少 C++ 链接器，请安装 Visual Studio Build Tools，并选择“使用 C++ 的桌面开发”。Linux 则需要系统提供常用的 C/C++ 编译工具和链接器。
+
+### 2. 构建渲染器
+
+在本项目根目录运行：
+
+```powershell
+npm.cmd run build:renderer
+```
+
+Linux 或 macOS 使用：
+
+```bash
+npm run build:renderer
+```
+
+构建脚本会自动克隆 [HyperSynapseNetwork/phira-web-monitor](https://github.com/HyperSynapseNetwork/phira-web-monitor)，应用本项目需要的音量、透明背景和 Hold 音符显示补丁，然后生成：
+
+```text
+vendor/renderer/pkg/                         # 浏览器 WASM 渲染器
+vendor/renderer/bin/chart-compiler.exe       # Windows 谱面编译器
+vendor/renderer/bin/chart-compiler           # Linux / macOS 谱面编译器
+```
+
+源码默认克隆到本项目相邻的 `phira-web-monitor-hsn` 目录。需要指定其他位置时，可以在运行命令前设置 `RENDERER_SRC` 环境变量。
+
+### 3. 可选资源包
+
+不安装资源包时，渲染器仍可运行，但会使用内置的简化纹理。个人部署需要使用上游默认资源包时，可以运行：
+
+```powershell
+npm.cmd run build:renderer -- --respack
+```
+
+资源包包含第三方美术和音效，不属于本项目的 MIT 许可证范围，不应在没有授权的情况下重新分发或提交到公开仓库。
+
+### 4. 使用预览
+
+默认配置中的 `MONITOR_RENDERER_PATH=vendor/renderer` 已指向上述构建目录，不需要额外修改。构建完成后刷新管理页面，在谱面列表中点击对应谱面的“预览”按钮即可。
+
+第一次预览某张谱面时，服务器需要解压音频并生成渲染数据，可能需要等待一段时间。生成的数据会缓存到 `data/monitor-cache/`，单个缓存可能达到几十 MB；可以通过 `.env` 中的 `MONITOR_CACHE_MAX_MB` 调整总缓存上限。
+
+如果页面提示“谱面渲染器尚未构建”，请检查以下文件是否存在：
+
+```text
+vendor/renderer/pkg/monitor_client.js
+vendor/renderer/pkg/monitor_client_bg.wasm
+vendor/renderer/bin/chart-compiler.exe        # Windows
+vendor/renderer/bin/chart-compiler            # Linux / macOS
+```
+
 ## 安装多人房间服务 PMP+
 
 不需要多人功能时可以跳过本节。
