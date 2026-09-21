@@ -82,5 +82,8 @@ echo Showing the latest log entries. Press Ctrl+C to close the log viewer.
 echo The Probe service will keep running; use stop-probe.cmd to stop it.
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '%~dp0logs\server.log' -Tail 20 -Wait"
+rem -Encoding UTF8 is required: the server writes logs as UTF-8 without a BOM, while
+rem Windows PowerShell 5.1 otherwise decodes them with the system ANSI code page (GBK
+rem on Chinese Windows), which shows mojibake in this window.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '%~dp0logs\server.log' -Tail 20 -Wait -Encoding UTF8"
 exit /b 0
