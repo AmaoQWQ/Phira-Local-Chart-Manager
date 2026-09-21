@@ -25,7 +25,7 @@
 | 网页管理与谱面 Gateway | 必需 | 管理谱面、账号、实例、成绩，并响应 Phira 客户端请求 |
 | 定制版 PMP+ | 可选 | 提供多人房间；需要 PostgreSQL |
 | 谱面预览渲染器 | 可选 | 在管理页面预览谱面；需要另外构建 |
-| 成绩 Token 验证材料 | 可选 | 自动验证兼容客户端上传的私有成绩；验证密钥不会包含在公开仓库中 |
+| 成绩令牌验证材料 | 可选 | 自动验证兼容客户端上传的私有成绩；验证密钥不会包含在公开仓库中 |
 
 只想先看看管理页面时，不需要安装 PMP+、PostgreSQL、Rust 或成绩验证密钥。
 
@@ -36,13 +36,13 @@
 需要：
 
 - [Git](https://git-scm.com/)
-- [Node.js](https://nodejs.org/) 22.5 或更高版本
+- [Node.js](https://nodejs.org/) 22.13 或更高版本
 
 安装 Node.js 后请重新打开终端，确保以下命令可以运行：
 
 ```powershell
 node --version
-npm --version
+npm.cmd --version
 ```
 
 ### 2. 下载项目
@@ -55,17 +55,22 @@ cd Phira-Local-Chart-Manager
 ### 3. 创建配置文件
 
 ```powershell
-Copy-Item .env.example .env
+npm.cmd run setup
 ```
 
-用文本编辑器打开 `.env`。第一次本机运行至少要修改以下两项：
+该命令会从 `.env.example` 创建不会提交到 Git 的 `.env`，并分别生成随机的 `ADMIN_TOKEN`、`PMP_ADMIN_TOKEN` 和 `HSN_SECRET_KEY`。如果直接双击 `start-probe.cmd`，启动脚本也会自动完成这一步。
+
+本机测试可以直接使用生成的配置。`.env.example` 中的 `PUBLIC_BASE_URL` 默认留空，此时服务会根据每次请求的 Host 生成谱面资源链接。
+
+准备让原版 Phira 客户端接入时，再用文本编辑器打开 `.env`，明确设置：
 
 ```env
-PUBLIC_BASE_URL=https://localhost
-ADMIN_TOKEN=请替换为一串足够长的随机字符
+PUBLIC_BASE_URL=https://phira.5wyxi.com
 ```
 
-`ADMIN_TOKEN` 用于证明你是服务器所有者。不要使用示例值，也不要把真实值发给别人或提交到 GitHub。
+这不是把官方服务设为上游，而是在返回的私有谱面信息中写入玩家真正访问的外部地址。原版 Phira 的接入还必须使用外部 `443` 端口和 DNS 改写，完整说明见下方“Phira 客户端网络模型”。自定义客户端若允许修改 API 地址，才应在这里填写你自己的域名。
+
+`ADMIN_TOKEN` 用于证明你是服务器所有者。首次初始化管理员时需要从 `.env` 复制它；不要把真实值发给别人或提交到 GitHub。已有 `.env` 不会被初始化命令覆盖。
 
 ### 4. 启动服务
 
@@ -77,11 +82,12 @@ ADMIN_TOKEN=请替换为一串足够长的随机字符
 
 第一次启动时，脚本会自动：
 
-1. 安装 Node.js 依赖。
-2. 生成本机测试用的自签名 HTTPS 证书。
-3. 编译 TypeScript。
-4. 尝试启动可选的 PMP+。
-5. 启动网页管理与谱面服务。
+1. 检查 Node.js 版本，并在缺少 `.env` 时生成本机配置和随机密钥。
+2. 安装 Node.js 依赖。
+3. 生成本机测试用的自签名 HTTPS 证书。
+4. 编译 TypeScript。
+5. 尝试启动可选的 PMP+。
+6. 启动网页管理与谱面服务。
 
 没有安装 PMP+ 时会出现提示，但网页管理服务仍会正常启动，只是多人房间暂不可用。
 
@@ -90,7 +96,9 @@ ADMIN_TOKEN=请替换为一串足够长的随机字符
 - `http://127.0.0.1:9000/admin`：仅供服务器本机管理
 - `https://localhost/admin`：HTTPS 管理入口
 
-自签名证书会触发浏览器安全警告，这是本机测试环境的正常现象。正式公网部署应换成受信任的 HTTPS 证书。
+自签名证书会触发浏览器安全警告，这是本机测试环境的正常现象。启动脚本生成的测试证书同时包含 `localhost` 和 `phira.5wyxi.com`。不要把忽略证书警告当成普通公网网站的安全做法。
+
+如果启动失败，并且 `logs/server-error.log` 出现 `EADDRINUSE` 或 `EACCES`，表示 `443` 已被占用或当前账号不能监听该端口。本机测试可在 `.env` 中改为 `PORT=8443`，重启后访问 `https://localhost:8443/admin`；原版 Phira 接入仍必须保证外部 `443` 能到达 Gateway。
 
 ### 5. 创建第一个管理员
 
@@ -115,16 +123,16 @@ ADMIN_TOKEN=请替换为一串足够长的随机字符
 
 ## Linux / macOS 快速开始
 
-安装 Git 和 Node.js 22.5 或更高版本，然后运行：
+安装 Git 和 Node.js 22.13 或更高版本，然后运行：
 
 ```bash
 git clone https://github.com/AmaoQWQ/Phira-Local-Chart-Manager.git
 cd Phira-Local-Chart-Manager
 npm install
-cp .env.example .env
+npm run setup
 ```
 
-编辑 `.env`，至少设置 `ADMIN_TOKEN` 和正确的 `PUBLIC_BASE_URL`。Linux 普通用户通常不能直接监听 443 端口，本机测试可将 `PORT` 改为 `8443`。
+初始化命令会生成独立的管理令牌和 PMP+ 密钥。Linux 和 macOS 的普通用户通常不能直接监听 443 端口，本机浏览器测试可在 `.env` 中将 `PORT` 改为 `8443`，然后访问 `https://localhost:8443/admin`。`PUBLIC_BASE_URL` 留空即可跟随请求入口。
 
 生成测试证书、编译并启动：
 
@@ -134,7 +142,7 @@ npm run build
 npm start
 ```
 
-此方式在前台运行，按 `Ctrl+C` 停止。公网部署建议使用 systemd、容器或其他进程管理器，并通过反向代理提供受信任的 HTTPS。
+此方式在前台运行，按 `Ctrl+C` 停止。公网部署建议使用 systemd、容器或其他进程管理器。若 Gateway 内部监听 `8443`，还需要用路由器端口映射或反向代理把外部 `443` 转到该端口；DNS 改写本身不能转换端口。
 
 ## 常用命令
 
@@ -142,6 +150,7 @@ Windows PowerShell 可将下面的 `npm` 换成 `npm.cmd`。
 
 | 命令 | 作用 |
 | --- | --- |
+| `npm run setup` | 首次创建 `.env` 并生成随机管理令牌和密钥 |
 | `npm run build` | 编译项目 |
 | `npm run start:gateway` | 在后台只启动网页与谱面服务 |
 | `npm run start:quick` | 尝试启动 PMP+，然后启动网页与谱面服务 |
@@ -159,21 +168,98 @@ Windows PowerShell 可将下面的 `npm` 换成 `npm.cmd`。
 3. 检查名称、难度、谱师、作曲和曲绘作者等信息。
 4. 将需要展示的谱面设为上架。
 5. 设置实例对 Phira 用户的可见范围。
-6. 把你的 HTTPS 服务地址和客户端接入方式告诉玩家。
+6. 把私服 IP、DNS 改写方法、证书要求和可选的多人地址告诉玩家。
 
-玩家不需要注册管理面板账号。管理账号只提供给需要上传谱面或协助维护服务的人。面向玩家的接入说明见 [USER.md](USER.md)，部署者应先把其中的域名和服务器地址改成自己的实际信息。
+玩家不需要注册管理面板账号。管理账号只提供给需要上传谱面或协助维护服务的人。面向玩家的接入说明见 [USER.md](USER.md)，部署者应先填入自己的服务器 IP、证书要求和多人地址。
 
-## 让其他设备访问
+## Phira 客户端网络模型
 
-`127.0.0.1` 和 `localhost` 只能表示当前电脑。手机或其他电脑要连接服务，需要满足以下条件：
+先区分四个容易混淆的地址：
 
-- 服务器拥有其他设备可以访问的局域网 IP 或公网域名。
-- 防火墙允许 HTTPS 端口；多人功能还需要允许 PMP+ 的游戏 TCP 端口。
-- `.env` 中的 `PUBLIC_BASE_URL` 是玩家实际使用的 HTTPS 地址。
-- HTTPS 证书与域名匹配并受客户端信任。
-- 如果通过反向代理部署，应只公开需要的入口，不要公开本机管理端口 `9000`。
+| 名称 | 作用 |
+| --- | --- |
+| `phira.5wyxi.com:443` | 原版 Phira 固定访问的 HTTPS API 入口 |
+| `PORT` | Gateway 在服务器内部监听的 HTTPS 端口 |
+| `PUBLIC_BASE_URL` | 写入私有谱面曲绘、音频和 `.pez` 下载链接的外部地址；它不会改变原版客户端访问哪个 API |
+| `UPSTREAM_BASE_URL` | Gateway 在服务器端转发非私有请求时访问的官方服务 |
 
-Phira 客户端的具体接入方式取决于所使用的客户端版本和部署域名。服务器所有者应向玩家提供最终域名、证书要求和多人服务器地址。
+原版客户端的标准链路是：
+
+```text
+原版 Phira 请求 https://phira.5wyxi.com:443
+  → 玩家设备上的 DNS 改写把 phira.5wyxi.com 指向私服 IP
+  → 私服外部 TCP 443
+  → Gateway 直接监听 443，或由端口映射/反向代理转到 Gateway 内部端口
+  → 私有谱面请求由 Gateway 处理，其余请求转发到 UPSTREAM_BASE_URL
+```
+
+DNS 只把域名解析到另一个 IP，不能把客户端固定使用的 `443` 改成 `8443`。因此 `https://服务器IP:8443` 可以用于浏览器测试，但不能直接供原版 Phira 使用。
+
+### 场景一：只在服务器本机测试管理页面
+
+保持 `PUBLIC_BASE_URL` 为空。Gateway 使用 `PORT=443` 时访问 `https://localhost/admin`；若使用 `PORT=8443`，访问 `https://localhost:8443/admin`。本机测试不需要 DNS 改写，也不需要让公网访问任何端口。
+
+### 场景二：让原版 Phira 接入
+
+1. 确保玩家可以访问服务器 IP。仅同一局域网使用时可提供局域网 IP；互联网使用需要公网入口。
+2. 让外部 TCP `443` 到达 Gateway。可以让 Gateway 直接使用 `PORT=443`，由路由器把外部 `443` 映射到 Gateway 的内部 `8443`，也可以由反向代理监听外部 `443` 并转发到内部 `8443`。
+3. 在防火墙中只开放需要的入口。不要公开本机管理端口 `9000` 或 PMP+ HTTP 管理端口 `12357`。
+4. 在 `.env` 中设置：
+
+```env
+UPSTREAM_BASE_URL=https://phira.5wyxi.com
+PUBLIC_BASE_URL=https://phira.5wyxi.com
+```
+
+5. 不要在服务器自身的 hosts 文件或 DNS 中把 `phira.5wyxi.com` 指回私服。DNS 改写只应发生在玩家设备，否则 Gateway 转发官方请求时会循环访问自己。
+6. 在管理面板的目标服务实例中加入 Host `phira.5wyxi.com`。原版客户端只有这一个 Host，因此同一个入口只能按 Host 命中一个实例；多实例面向不同人群时应使用实例可见范围，若要按不同域名区分则需要可修改 API 地址的客户端。
+7. 把 [USER.md](USER.md) 复制为部署专用指南，填入私服 IP 与证书要求后发给玩家。真实地址可保存在忽略提交的 `data/site-docs/USER.md`。
+
+如果服务器位于家用路由器后面，还要把路由器的外部 TCP `443` 转发到实际提供入口的机器。若运营商使用 CGNAT、没有可入站的公网地址，普通端口转发不会生效，需要 VPS、公网隧道或其他能接收 TCP `443` 的入口。多人功能另需按实际配置开放并转发 PMP+ 游戏 TCP 端口，默认是 `12356`。
+
+### 证书与“不安全模式”
+
+原版 Phira 连接时校验的主机名是 `phira.5wyxi.com`。部署者通常不拥有这个官方域名，因此不能为它申请常规公开 CA 证书；本项目生成的是包含该域名的自签名测试证书。玩家使用这种入口时通常需要在 Phira 中明确开启“不安全模式”。这会降低 TLS 身份校验能力，只应连接自己信任的服务器，返回官方服务后应关闭。
+
+这种接入本质上是在玩家设备上把官方 API 域名导向私人 Gateway。Gateway 会接收 Phira 发出的 API 请求，包括其中可能携带的登录凭据或授权信息，再把非私有请求转发到官方服务。部署者必须保护日志和服务器；玩家也必须确认自己信任部署者。受信任证书只能证明当前连接的域名身份，不能消除私人代理本身的信任边界。
+
+### 场景三：自定义客户端或自有域名
+
+只有当客户端允许修改 API 基础地址时，才可以让它直接访问 `https://charts.example.com`，无需把官方域名做 DNS 改写。此时将 `PUBLIC_BASE_URL` 设为同一个外部地址，并为自有域名配置受信任的 HTTPS 证书。这种方式不适用于 API 地址固定的原版 Phira。
+
+### 使用反向代理
+
+反向代理必须保留原始 `Host`，否则服务实例路由会失效。它可以在外部监听 `443`，再转发到 `https://127.0.0.1:8443`；`PUBLIC_BASE_URL` 仍填写玩家看到的外部地址，不要带内部 `:8443`。同时传递 `X-Forwarded-Host` 与 `X-Forwarded-Proto`，并确保代理到 Gateway 时正确处理本地自签名证书。
+
+例如，Gateway 的 `.env` 可以使用：
+
+```env
+HOST=127.0.0.1
+PORT=8443
+PUBLIC_BASE_URL=https://phira.5wyxi.com
+```
+
+对应的 Nginx 核心配置如下。证书路径应换成实际路径；前端证书仍需包含 `phira.5wyxi.com`。`proxy_ssl_verify off` 只用于同机回环地址上的自签名 Gateway，不应拿来关闭公网后端的校验。
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name phira.5wyxi.com;
+
+    ssl_certificate     /path/to/server.crt;
+    ssl_certificate_key /path/to/server.key;
+
+    location / {
+        proxy_pass https://127.0.0.1:8443;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+需要在根路径展示项目主页时，可将 `HOMEPAGE_HOST` 设为专门的主页域名；留空时 Gateway 不会拦截根路径。主页域名与原版 Phira 使用的 API Host 是两个不同概念。
 
 ## 安装谱面预览功能
 
@@ -261,25 +347,28 @@ vendor/renderer/bin/chart-compiler            # Linux / macOS
 
 ### 自动安装
 
-Windows x64、Linux x64 和 Linux ARM64 可以运行：
+Windows x64 可以运行：
 
 ```powershell
 npm.cmd run install:pmp
 ```
 
-Linux 或 macOS 使用：
+Linux x64 或 Linux ARM64 使用：
 
 ```bash
 npm run install:pmp
 ```
 
-安装器会从 GitHub Release 下载当前平台的程序，使用 `SHA256SUMS` 校验文件，并生成 `pmp-runtime/server_config.yml`。然后完成以下配置：
+macOS 暂无配套的预编译包，请直接使用下方“从源码编译 PMP+”的方法。
+
+安装器只负责从 GitHub Release 下载当前平台的程序、使用 `SHA256SUMS` 校验文件，并在缺少配置时生成 `pmp-runtime/server_config.yml`；它不会安装 PostgreSQL、创建数据库或替你填写连接信息。下载完成后还需要手动完成：
 
 1. 安装并启动 PostgreSQL。
 2. 编辑 `pmp-runtime/server_config.yml`，填写可用的 `database_url`。
 3. 在 `.env` 中设置独立的 `HSN_SECRET_KEY`，用于保持稳定的节点身份。
 4. 在 `.env` 中设置 `PMP_ADMIN_TOKEN`；留空时会使用 `ADMIN_TOKEN`。
 5. 确认 `PMP_BASE_URL` 与 PMP+ 配置中的 HTTP 端口一致。
+6. 如果暂不安装下方的房间实时监控插件，保持 `.env` 中的 `PMP_MONITOR_ENABLED=false`。
 
 启动并检查：
 
@@ -290,7 +379,73 @@ npm.cmd run status:pmp
 
 默认情况下，PMP+ 游戏端口为 TCP `12356`，HTTP 管理端口为 `12357`；实际值以 `pmp-runtime/server_config.yml` 为准。
 
-### 为什么必须使用定制版
+### 安装房间实时监控插件（可选）
+
+定制版 PMP+ 自带 `/admin/rooms` 管理接口，不安装插件也可以在管理页面创建、修改和解散托管房间。若还需要观察普通玩家自行创建的房间，并让管理页面实时显示加入、离开、选谱、开局和成绩等变化，则安装第三方 [HSNPhira-v2-PMP-plugin](https://github.com/FireflyF09/HSNPhira-v2-PMP-plugin)。
+
+本项目不重新分发该插件，而是直接使用原作者的 Release。当前文档固定使用 [`v0.2.51`](https://github.com/FireflyF09/HSNPhira-v2-PMP-plugin/releases/tag/v0.2.51)，不要直接下载仓库页面上的 Source code ZIP。
+
+先停止 PMP+。Windows PowerShell 在本项目根目录运行：
+
+```powershell
+npm.cmd run stop:pmp
+New-Item -ItemType Directory -Force pmp-runtime/plugins | Out-Null
+$pluginUrl = 'https://github.com/FireflyF09/HSNPhira-v2-PMP-plugin/releases/download/v0.2.51/hsnphira_v2_pmp_plugin.component.wasm'
+$pluginPath = 'pmp-runtime/plugins/hsnphira_v2_pmp_plugin.component.wasm'
+Invoke-WebRequest -Uri $pluginUrl -OutFile $pluginPath
+(Get-FileHash -Algorithm SHA256 $pluginPath).Hash.ToLower()
+```
+
+输出的 SHA-256 应为：
+
+```text
+943d6cc3e84981b0a91fbbb45334cedf2e1c72b2b032c1a19e5d8a07f4962dfb
+```
+
+Linux 或 macOS 使用：
+
+```bash
+npm run stop:pmp
+mkdir -p pmp-runtime/plugins
+curl -fL \
+  https://github.com/FireflyF09/HSNPhira-v2-PMP-plugin/releases/download/v0.2.51/hsnphira_v2_pmp_plugin.component.wasm \
+  -o pmp-runtime/plugins/hsnphira_v2_pmp_plugin.component.wasm
+```
+
+Linux 校验文件：
+
+```bash
+echo '943d6cc3e84981b0a91fbbb45334cedf2e1c72b2b032c1a19e5d8a07f4962dfb  pmp-runtime/plugins/hsnphira_v2_pmp_plugin.component.wasm' | sha256sum -c -
+```
+
+macOS 校验文件：
+
+```bash
+test "$(shasum -a 256 pmp-runtime/plugins/hsnphira_v2_pmp_plugin.component.wasm | awk '{print $1}')" = '943d6cc3e84981b0a91fbbb45334cedf2e1c72b2b032c1a19e5d8a07f4962dfb'
+```
+
+插件文件必须直接位于 `pmp-runtime/plugins/`，不要再放进子目录。然后在 `.env` 中设置：
+
+```env
+PMP_MONITOR_ENABLED=true
+PMP_BASE_URL=http://127.0.0.1:12357
+PMP_ROOMS_SNAPSHOT_PATH=/api/rooms/info
+PMP_EVENTS_PATH=/api/rooms/listen
+PMP_MONITOR_TOKEN=
+```
+
+重新启动 PMP+ 和 Gateway：
+
+```powershell
+npm.cmd run start:pmp
+npm.cmd run stop:gateway
+npm.cmd run start:gateway
+npm.cmd run status:pmp
+```
+
+Linux 或 macOS 将上述命令中的 `npm.cmd` 换成 `npm`。最后访问 `http://127.0.0.1:12357/api/rooms/info`；正常情况下会返回 JSON 数组。若返回 404，请确认文件没有放进子目录并已重启 PMP+；若 PMP+ 启动失败，请检查 `logs/pmp-server-error.log`。插件与 PMP+ 的 WASM/WIT 接口必须兼容，升级任一方后都应重新验证这两个监控端点。
+
+### 为什么多人房间管理需要定制版
 
 这个 PMP+ 版本提供了本项目网页管理所依赖的能力：
 
@@ -408,11 +563,11 @@ illustrator: Example Artist
 
 ## 安全提示
 
-- 不要提交真实的 `.env`、数据库口令、管理 Token、证书私钥或成绩验证材料。
+- 不要提交真实的 `.env`、数据库口令、管理令牌、证书私钥或成绩验证材料。
 - 为 `ADMIN_TOKEN`、`PMP_ADMIN_TOKEN` 和 `HSN_SECRET_KEY` 使用不同的随机值。
 - 不要把只供本机使用的 `ADMIN_PORT` 暴露到公网。
-- 不要在日志、截图、工单或聊天记录中粘贴 Cookie、Token 或完整请求体。
-- 正式部署必须使用有效的 HTTPS 证书，不要让玩家长期依赖关闭证书校验。
+- 不要在日志、截图、工单或聊天记录中粘贴 Cookie、访问令牌或完整请求体。
+- 自定义客户端使用自有域名时，应配置受信任的 HTTPS 证书；原版 Phira 的官方域名改写方案通常只能使用自签名证书和“不安全模式”，必须把相应风险明确告知玩家。
 - 如果凭据可能已经泄露，应立即轮换；仅删除文件或提交记录并不能使旧凭据失效。
 
 ## 开发与测试

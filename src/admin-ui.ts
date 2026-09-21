@@ -252,7 +252,7 @@ $('#reviewForm').onsubmit=e=>{e.preventDefault();task(e.submitter,async()=>{awai
 
 ${policyClient()}
 ${previewClient()}
-var DOC_META={user:{title:'用户接入指南',eyebrow:'PLAYER GUIDE',intro:'给 Phira 玩家看的连接教程：下载 DNS Override，并把 phira.5wyxi.com 指向 203.0.113.10。'},api:{title:'API 文档',eyebrow:'API REFERENCE',intro:'管理接口、客户端接入与错误码参考。'}};
+var DOC_META={user:{title:'用户接入指南',eyebrow:'PLAYER GUIDE',intro:'查看当前服务器为 Phira 玩家提供的连接与游玩方法。'},api:{title:'API 文档',eyebrow:'API REFERENCE',intro:'管理接口、客户端接入与错误码参考。'}};
 var DOC_PDF_FILES={user:'phira-user-guide.pdf',api:'phira-api.pdf'};
 var docPdfId='';
 var DOC_BT=String.fromCharCode(96),DOC_FENCE=DOC_BT+DOC_BT+DOC_BT;

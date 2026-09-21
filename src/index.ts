@@ -51,12 +51,16 @@ const MAX_BODY_PREVIEW_BYTES = 4096;
 const MAX_PROXY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_ADMIN_BODY_BYTES = 768 * 1024 * 1024;
 const PROFILE_CACHE_MS = 10 * 60 * 1000;
-const HOMEPAGE_HOST = "charts.example.com";
 const DOC_FILES: Record<string, string> = {
   user: "USER.md",
   api: "docs/API.md",
   readme: "README.md",
 };
+function documentFilePath(config: Config, documentId: string): string {
+  return documentId === "user"
+    ? config.userGuidePath
+    : path.resolve(process.cwd(), DOC_FILES[documentId]);
+}
 const DOC_PDF_TITLES: Record<string, string> = {
   user: "Phira 用户接入指南",
   api: "Phira API 文档",
@@ -598,10 +602,11 @@ function makeRequestHandler(
       const isAdminPage = method === "GET" && requestUrl.pathname === "/admin";
       const isHomepage =
         publicGateway &&
+        Boolean(config.homepageHost) &&
         method === "GET" &&
         requestUrl.pathname === "/" &&
-        (hostMatches(request.headers.host, HOMEPAGE_HOST) ||
-          hostMatches(request.headers["x-forwarded-host"], HOMEPAGE_HOST)) &&
+        (hostMatches(request.headers.host, config.homepageHost!) ||
+          hostMatches(request.headers["x-forwarded-host"], config.homepageHost!)) &&
         String(request.headers.accept || "").includes("text/html");
       adminRequest = isAdminApi;
       if (isHomepage) {
@@ -670,7 +675,7 @@ function makeRequestHandler(
         if (identity.user.approvalStatus !== "approved") throw new AdminError(403, "注册申请尚未通过审核，请在申请状态页查看进度");
         const docMatch = /^\/api\/admin\/docs\/(user|api|readme)$/.exec(requestUrl.pathname);
         if (docMatch && method === "GET") {
-          const documentFile = path.resolve(process.cwd(), DOC_FILES[docMatch[1]]);
+          const documentFile = documentFilePath(config, docMatch[1]);
           try {
             json(response, { id: docMatch[1], content: fs.readFileSync(documentFile, "utf8") });
           } catch {
@@ -681,7 +686,7 @@ function makeRequestHandler(
         const pdfMatch = /^\/api\/admin\/docs\/(user|api|readme)\/pdf$/.exec(requestUrl.pathname);
         if (pdfMatch && method === "GET") {
           const documentId = pdfMatch[1];
-          const documentFile = path.resolve(process.cwd(), DOC_FILES[documentId]);
+          const documentFile = documentFilePath(config, documentId);
           try {
             const markdown = fs.readFileSync(documentFile, "utf8");
             const pdf = await renderPdfFromHtml(documentPdfHtml({ title: DOC_PDF_TITLES[documentId], source: markdown }));

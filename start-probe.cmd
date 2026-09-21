@@ -6,7 +6,7 @@ cd /d "%~dp0"
 where node >nul 2>nul
 if errorlevel 1 (
   echo [ERROR] Node.js was not found in PATH.
-  echo         Install Node.js 22.5 or newer, then reopen this window.
+  echo         Install Node.js 22.13 or newer, then reopen this window.
   pause
   exit /b 1
 )
@@ -14,7 +14,13 @@ if errorlevel 1 (
 where npm.cmd >nul 2>nul
 if errorlevel 1 (
   echo [ERROR] npm was not found in PATH.
-  echo         Install Node.js 22.5 or newer, then reopen this window.
+  echo         Install Node.js 22.13 or newer, then reopen this window.
+  pause
+  exit /b 1
+)
+
+call node scripts\prepare-env.js
+if errorlevel 1 (
   pause
   exit /b 1
 )

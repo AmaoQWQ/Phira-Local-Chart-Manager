@@ -54,12 +54,21 @@ async function api(url, options = {}) {
     });
     await api("http://127.0.0.1:19000/api/admin/instances/test-instance", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "X-Admin-Reason": encodeURIComponent("Update regression instance"),
+      },
       body: JSON.stringify({ name: "Updated Test", hosts: ["test-instance.local"], enabled: false }),
     });
     const dashboard = await api("http://127.0.0.1:19000/api/admin/dashboard?instance=test-instance");
     if (dashboard.instance?.id !== "test-instance") throw new Error("instance selection failed");
-    await api("http://127.0.0.1:19000/api/admin/instances/test-instance", { method: "DELETE" });
+    await api("http://127.0.0.1:19000/api/admin/instances/test-instance", {
+      method: "DELETE",
+      headers: {
+        "X-Admin-Reason": encodeURIComponent("Delete regression instance"),
+        "X-Admin-Confirm": "test-instance",
+      },
+    });
     console.log(`instance API test passed; default=default; created=${created.id}; selected=${dashboard.instance.id}`);
   } finally {
     await new Promise((resolve) => {

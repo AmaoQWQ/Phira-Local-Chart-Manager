@@ -9,8 +9,12 @@ export interface Config {
   multiplayerHost: string;
   multiplayerPort: number;
   upstreamBaseUrl: string;
-  /** Stable public origin used in private chart resource URLs. */
+  /** Optional external origin embedded in private chart resource URLs; otherwise follows the request Host. */
   publicBaseUrl: string | null;
+  /** Optional dedicated hostname that serves the browser homepage. */
+  homepageHost: string | null;
+  /** Deployment-specific player guide; kept outside Git when it contains a real IP. */
+  userGuidePath: string;
   privateChartsPath: string;
   instancesPath: string;
   privateChartListing: boolean;
@@ -103,6 +107,8 @@ export function loadConfig(): Config {
     multiplayerPort: positiveIntegerFromEnv("MULTIPLAYER_PORT", 12348),
     upstreamBaseUrl: process.env.UPSTREAM_BASE_URL || "https://phira.5wyxi.com",
     publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "") || null,
+    homepageHost: (process.env.HOMEPAGE_HOST || "").trim().toLowerCase() || null,
+    userGuidePath: resolveFromProjectRoot(process.env.USER_GUIDE_PATH || "USER.md"),
     privateChartsPath: resolveFromProjectRoot(process.env.PRIVATE_CHARTS_PATH || "data/private-charts"),
     instancesPath: resolveFromProjectRoot(process.env.INSTANCE_REGISTRY_PATH || "data/instances/instances.json"),
     // No chart assets are bundled in the public template. Enable listing only

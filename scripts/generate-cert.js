@@ -35,4 +35,5 @@ fs.writeFileSync(keyPath, result.private, { mode: 0o600 });
 
 console.log(`Generated certificate: ${certPath}`);
 console.log(`Generated private key: ${keyPath}`);
-console.log("This is a self-signed certificate for testing Phira unsafe mode only.");
+console.log("Hosts: phira.5wyxi.com, localhost, 127.0.0.1");
+console.log("This self-signed certificate is only for local testing or explicitly enabled Phira unsafe mode.");
