@@ -1,8 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import os from "node:os";
-import { pathToFileURL } from "node:url";
 import { AdminAccountStore, AdminError, checkAdminMutation, validBootstrapToken, type AdminIdentity } from "./admin-accounts";
 import { can, canManageAccount, canViewAllRooms, instanceCapabilities, LEVELS, PERMISSIONS, type Permission } from "./admin-policy";
 import { PhiraViewerResolver } from "./phira-viewer";
@@ -65,11 +62,6 @@ const DOC_PDF_TITLES: Record<string, string> = {
   user: "Phira 用户接入指南",
   api: "Phira API 文档",
   readme: "Phira 本地谱面管理系统",
-};
-const DOC_PDF_FILENAMES: Record<string, string> = {
-  user: "phira-user-guide.pdf",
-  api: "phira-api.pdf",
-  readme: "phira-readme.pdf",
 };
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -139,74 +131,6 @@ function hostMatches(value: string | string[] | undefined, expected: string): bo
       .replace(/\.$/, "");
     return host === expected;
   }));
-}
-
-function findPdfBrowser(): string | null {
-  const candidates = [
-    process.env.PDF_BROWSER_PATH,
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/microsoft-edge",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      // Ignore invalid paths.
-    }
-  }
-  return null;
-}
-
-async function renderPdfFromHtml(html: string): Promise<Buffer> {
-  const browser = findPdfBrowser();
-  if (!browser) throw new Error("此服务器未安装可用于生成 PDF 的无头浏览器");
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "phira-doc-pdf-"));
-  try {
-    const htmlPath = path.join(temporaryRoot, "document.html");
-    const pdfPath = path.join(temporaryRoot, "document.pdf");
-    const profilePath = path.join(temporaryRoot, "edge-profile");
-    fs.mkdirSync(profilePath, { recursive: true });
-    fs.writeFileSync(htmlPath, html, "utf8");
-    const args = [
-      "--headless",
-      "--disable-gpu",
-      "--no-first-run",
-      "--hide-scrollbars",
-      "--window-size=1280,1600",
-      "--print-to-pdf-no-header",
-      `--print-to-pdf=${pdfPath}`,
-      `--user-data-dir=${profilePath}`,
-      pathToFileURL(htmlPath).href,
-    ];
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(browser, args, { windowsHide: true, stdio: "ignore" });
-      const timer = setTimeout(() => {
-        child.kill();
-        reject(new Error("PDF 生成超时"));
-      }, 60_000);
-      child.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-      child.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-    if (!fs.existsSync(pdfPath)) throw new Error("PDF 文件未生成");
-    return fs.readFileSync(pdfPath);
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
 }
 
 type MultipartPart = { value: string | Buffer; filename?: string };
@@ -693,30 +617,6 @@ function makeRequestHandler(
             html(response, documentPdfHtml({ title: DOC_PDF_TITLES[documentId], source: markdown }));
           } catch {
             json(response, { error: "document not found" }, 404);
-          }
-          return;
-        }
-        const pdfMatch = /^\/api\/admin\/docs\/(user|api|readme)\/pdf$/.exec(requestUrl.pathname);
-        if (pdfMatch && method === "GET") {
-          const documentId = pdfMatch[1];
-          const documentFile = documentFilePath(config, documentId);
-          try {
-            const markdown = fs.readFileSync(documentFile, "utf8");
-            const pdf = await renderPdfFromHtml(documentPdfHtml({ title: DOC_PDF_TITLES[documentId], source: markdown }));
-            const filename = DOC_PDF_FILENAMES[documentId];
-            response.statusCode = 200;
-            response.setHeader("Content-Type", "application/pdf");
-            response.setHeader("Cache-Control", "no-store");
-            response.setHeader("X-Content-Type-Options", "nosniff");
-            response.setHeader("Content-Length", pdf.length);
-            response.setHeader("Content-Disposition", `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-            response.end(pdf);
-          } catch (error) {
-            if (!response.headersSent) {
-              json(response, { ok: false, error: error instanceof Error ? error.message : "PDF generation failed" }, 500);
-            } else {
-              response.destroy();
-            }
           }
           return;
         }
