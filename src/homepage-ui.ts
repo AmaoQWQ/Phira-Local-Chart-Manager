@@ -1,3 +1,5 @@
+import { phiraThemeCss } from "./ui-theme";
+
 /** Self-contained landing page; no CDN, third-party scripts or external assets. */
 export function homepageUi(): string {
   return `<!doctype html>
@@ -9,10 +11,11 @@ export function homepageUi(): string {
 <meta name="robots" content="index,follow">
 <title>Phira 本地谱面管理系统</title>
 <style>
+${phiraThemeCss()}
 :root{
   font-family:Inter,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-  color:#e9efef;
-  background:#101617;
+  color:var(--text);
+  background:var(--bg);
   --px:0;
   --py:0;
 }
@@ -20,16 +23,16 @@ export function homepageUi(): string {
 html,body{height:100%}
 body{
   margin:0;
-  background:#101617;
-  color:#e9efef;
+  background:var(--bg);
+  color:var(--text);
   font-size:16px;
   overflow:hidden;
   -webkit-font-smoothing:antialiased;
   text-rendering:optimizeLegibility;
 }
 a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
-a{color:var(--accent,#a9e8cc)}
-:focus-visible{outline:2px solid #c4f4df;outline-offset:3px;border-radius:6px}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:3px;border-radius:6px}
 
 /* Pointer-reactive backdrop -------------------------------------------------- */
 .scene{
@@ -131,30 +134,6 @@ main{
   align-items:center;
   animation:hero-in .5s ease-out both;
 }
-.eyebrow{
-  display:inline-flex;
-  align-items:center;
-  gap:12px;
-  margin:0 0 22px;
-  color:#a9e8cc;
-  font-size:11px;
-  font-weight:600;
-  letter-spacing:.32em;
-  text-transform:uppercase;
-  animation:hero-in .5s ease-out .05s both;
-}
-.eyebrow::before{
-  content:"";
-  width:30px;
-  height:1px;
-  background:linear-gradient(90deg,transparent,rgba(169,232,204,.8));
-}
-.eyebrow::after{
-  content:"";
-  width:30px;
-  height:1px;
-  background:linear-gradient(90deg,rgba(169,232,204,.8),transparent);
-}
 h1{
   margin:0;
   font-size:clamp(36px,5.2vw,62px);
@@ -192,9 +171,9 @@ h1 .no-break{
   min-height:52px;
   padding:0 24px;
   border-radius:12px;
-  background:#a9e8cc;
-  border:1px solid #a9e8cc;
-  color:#16362b;
+  background:var(--accent);
+  border:1px solid var(--accent);
+  color:var(--on-accent);
   font-size:16px;
   font-weight:650;
   line-height:1;
@@ -205,7 +184,7 @@ h1 .no-break{
 .cta svg{
   width:17px;
   height:17px;
-  stroke:#16362b;
+  stroke:var(--on-accent);
   stroke-width:2;
   fill:none;
   stroke-linecap:round;
@@ -213,8 +192,8 @@ h1 .no-break{
   transition:transform .15s ease-out;
 }
 .cta:hover{
-  background:#c4f4df;
-  border-color:#c4f4df;
+  background:var(--accent-hover);
+  border-color:var(--accent-hover);
   transform:translateY(-1px);
   box-shadow:0 20px 56px rgba(169,232,204,.16);
 }
@@ -249,8 +228,6 @@ h1 .no-break{
   .side-note{display:none}
   main{padding-top:6px;padding-bottom:30px}
   h1{font-size:clamp(34px,11.2vw,40px);line-height:1.3}
-  .eyebrow{gap:8px;letter-spacing:.22em;margin-bottom:18px}
-  .eyebrow::before,.eyebrow::after{width:18px}
   .lead{margin-top:18px;line-height:1.75}
   .action{margin-top:34px}
   .page-footer{font-size:9px;letter-spacing:1.4px}
@@ -290,9 +267,8 @@ h1 .no-break{
 
   <main>
     <div class="copy">
-      <p class="eyebrow">PHIRA LOCAL CHART MANAGER</p>
       <h1>Phira 本地谱面<span class="no-break">管理系统</span></h1>
-      <p class="lead">连接 Phira 客户端，在统一入口中管理本地谱面、成绩与多人房间。</p>
+      <p class="lead">管理本地谱面、成绩和多人房间。</p>
       <div class="action">
         <a class="cta" href="/admin">
           进入管理面板
@@ -300,7 +276,7 @@ h1 .no-break{
             <path d="M5 12h13M13 6l6 6-6 6"/>
           </svg>
         </a>
-        <p class="hint">登录或注册账号，审核通过后即可创建与管理自己的谱面空间</p>
+        <p class="hint">新账号需审核通过后才能创建实例。</p>
       </div>
     </div>
   </main>

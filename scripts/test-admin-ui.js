@@ -200,9 +200,23 @@ async function main() {
   await page.waitForFunction(() => document.querySelector('#statCharts').textContent === '27' && !document.querySelector('#reload').disabled);
   await page.locator('#toasts').evaluate(el => el.replaceChildren());
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.sidebar').evaluate(el => el.getAnimations().length ? Promise.all(el.getAnimations().map(animation => animation.finished)) : undefined);
   await page.screenshot({ path: path.join(output, 'mobile.png') });
+  await page.screenshot({ path: path.join(output, 'mobile-full.png'), fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'Mobile page must not overflow horizontally');
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.locator('.sidebar').evaluate(el => el.getAnimations().length ? Promise.all(el.getAnimations().map(animation => animation.finished)) : undefined);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, '360px page must not overflow horizontally');
+  await page.screenshot({ path: path.join(output, 'mobile-360.png') });
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await page.locator('.sidebar').evaluate(el => el.getAnimations().length ? Promise.all(el.getAnimations().map(animation => animation.finished)) : undefined);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'Tablet page must not overflow horizontally');
+  await page.screenshot({ path: path.join(output, 'tablet.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#navToggle').click();
+  assert.equal(await page.locator('#navToggle').getAttribute('aria-expanded'), 'true');
   await page.locator('[data-view=records]').click();
+  assert.equal(await page.locator('#navToggle').getAttribute('aria-expanded'), 'false');
   await page.locator('#recordSearch').fill('2002');
   assert.equal(await page.locator('#records tr').count(), 1);
   // A separately registered account must see and manage only its own instances.
@@ -222,6 +236,9 @@ async function main() {
   await member.locator('#registerForm button[type=submit]').click();
   await member.waitForFunction(() => !document.querySelector('#workspace').hidden && !document.querySelector('#reload').disabled);
   assert.equal(await member.locator('[data-page=application]').isVisible(), true);
+  assert.equal(await member.locator('[data-view=docs]').isVisible(), true);
+  assert.equal(await member.locator('[data-view=charts]').isVisible(), false);
+  assert.equal(await member.locator('[data-view=settings]').isVisible(), true);
   assert.equal(await member.locator('#createInstance').isDisabled(), true);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('#reload').click();
