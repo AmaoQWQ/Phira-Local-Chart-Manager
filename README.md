@@ -322,7 +322,7 @@ vendor/renderer/bin/chart-compiler           # Linux / macOS 谱面编译器
 npm.cmd run build:renderer -- --respack
 ```
 
-资源包包含第三方美术和音效，不属于本项目的 MIT 许可证范围，不应在没有授权的情况下重新分发或提交到公开仓库。
+资源包包含第三方美术和音效，不属于本项目的 Apache-2.0 许可证范围，不应在没有授权的情况下重新分发或提交到公开仓库。
 
 ### 4. 使用预览
 
@@ -587,4 +587,4 @@ npm run test:rooms
 
 ## License
 
-本项目自有代码使用 [MIT License](LICENSE) 发布。该许可证不适用于谱面、音乐、曲绘或其他第三方内容；上传者需要自行确认相应内容的授权范围。
+本项目自有代码使用 [Apache License 2.0](LICENSE) 发布。第三方依赖和构建产物遵循各自许可，例如 phira-web-monitor 渲染器使用 MIT；谱面、音乐、曲绘等上传内容不属于本项目许可证范围，上传者需自行确认相应授权。
