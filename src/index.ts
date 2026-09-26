@@ -524,13 +524,15 @@ function makeRequestHandler(
       const method = request.method || "UNKNOWN";
       const isAdminApi = requestUrl.pathname === "/api/admin" || requestUrl.pathname.startsWith("/api/admin/");
       const isAdminPage = method === "GET" && requestUrl.pathname === "/admin";
+      const isLocalHomepage = !publicGateway && config.homepageHost === "localhost";
       const isHomepage =
-        publicGateway &&
         Boolean(config.homepageHost) &&
         method === "GET" &&
         requestUrl.pathname === "/" &&
-        (hostMatches(request.headers.host, config.homepageHost!) ||
-          hostMatches(request.headers["x-forwarded-host"], config.homepageHost!)) &&
+        (isLocalHomepage ||
+          (publicGateway &&
+            (hostMatches(request.headers.host, config.homepageHost!) ||
+              hostMatches(request.headers["x-forwarded-host"], config.homepageHost!)))) &&
         String(request.headers.accept || "").includes("text/html");
       adminRequest = isAdminApi;
       if (isHomepage) {

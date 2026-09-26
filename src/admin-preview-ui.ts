@@ -47,6 +47,20 @@ export function previewDialog(): string {
 .preview-bar button{white-space:nowrap}
 .preview-volume{gap:8px!important}
 .preview-volume input[type=range]{width:104px;flex:0 0 auto}
+#previewDialog .dialog-body{background:var(--panel)}
+#previewDialog .preview-stage{border-color:#4b6159}
+#previewDialog .preview-bar{padding:16px 0 10px;border-bottom:1px solid var(--line)}
+#previewDialog #previewMeta{margin-top:14px;line-height:1.6}
+@media(max-width:700px){
+  #previewDialog .dialog-body{padding-top:12px}
+  #previewDialog .preview-stage{border-radius:8px}
+  #previewDialog .preview-bar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  #previewDialog #previewToggle,#previewDialog #previewRestart{width:100%}
+  #previewDialog #previewSeek{grid-column:1/-1;grid-row:2;width:100%;min-width:0}
+  #previewDialog #previewClock{grid-column:1/-1;text-align:right}
+  #previewDialog .preview-volume{grid-column:1/-1;white-space:normal}
+  #previewDialog .preview-volume input[type=range]{flex:1;min-width:0;width:auto}
+}
 </style>
 <dialog id="previewDialog" aria-labelledby="previewTitle" style="width:min(1180px,calc(100% - 24px))"><div class="dialog-head"><h2 id="previewTitle">谱面预览</h2><button data-close="previewDialog" aria-label="关闭">×</button></div><div class="dialog-body"><div class="preview-stage"><div class="preview-bg" id="previewBackground" hidden><img id="previewBackgroundImage" alt=""><div class="preview-bg-shade" style="background:rgba(0,0,0,0.3)"></div><div class="preview-bg-shade" id="previewBackgroundDim"></div></div><canvas id="previewCanvas"></canvas><p id="previewNotice" class="preview-notice">正在准备渲染器…</p></div><div class="preview-bar"><button id="previewToggle" class="small primary" disabled>播放</button><button id="previewRestart" class="small ghost" disabled>回到开头</button><input id="previewSeek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" disabled><span id="previewClock" class="mono muted">0:00</span><label class="check"><input type="checkbox" id="previewAutoplay" checked> 自动演示</label><label class="check preview-volume"><span class="muted">音量</span><input id="previewVolume" type="range" min="0" max="100" step="1" value="100" aria-label="音量"><span id="previewVolumeLabel" class="mono muted" style="width:42px">100%</span></label></div><p id="previewMeta" class="muted"></p></div></dialog>`;
 }
