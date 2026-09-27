@@ -82,21 +82,8 @@ a{color:var(--accent)}
 .brand{
   display:inline-flex;
   align-items:center;
-  gap:13px;
   color:#e9efef;
   text-decoration:none;
-}
-.brand-mark{
-  width:34px;
-  height:38px;
-  background:#a9e8cc;
-  clip-path:polygon(28% 0,100% 0,72% 100%,0 100%);
-  display:grid;
-  place-items:center;
-  color:#16362b;
-  font-size:19px;
-  font-weight:800;
-  line-height:1;
 }
 .brand-text strong{
   display:block;
@@ -109,9 +96,8 @@ a{color:var(--accent)}
   display:block;
   margin-top:3px;
   font-size:9px;
-  letter-spacing:2.8px;
+  letter-spacing:.08em;
   color:#92a3a4;
-  text-transform:uppercase;
 }
 .side-note{
   color:#748788;
@@ -255,11 +241,10 @@ h1 .no-break{
 
 <div class="page">
   <header class="topbar">
-    <a class="brand" href="/" aria-label="Phira 本地谱面管理系统首页">
-      <span class="brand-mark" aria-hidden="true">p</span>
+    <a class="brand" href="/" aria-label="Phira Local Chart Manager">
       <span class="brand-text">
-        <strong>phira</strong>
-        <small>LOCAL CHART MANAGER</small>
+        <strong>Phira</strong>
+        <small>Local Chart Manager</small>
       </span>
     </a>
     <span class="side-note">本地谱面服务</span>
