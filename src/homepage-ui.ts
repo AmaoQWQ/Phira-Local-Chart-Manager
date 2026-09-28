@@ -7,9 +7,10 @@ export function homepageUi(): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
 <meta name="robots" content="index,follow">
 <title>Phira 本地谱面管理系统</title>
+<script>(function(){try{var theme=localStorage.getItem('phira-color-scheme');if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme}catch(_){}})();</script>
 <style>
 ${phiraThemeCss()}
 :root{
@@ -26,7 +27,7 @@ body{
   background:var(--bg);
   color:var(--text);
   font-size:16px;
-  overflow:hidden;
+  overflow-x:hidden;
   -webkit-font-smoothing:antialiased;
   text-rendering:optimizeLegibility;
 }
@@ -42,8 +43,9 @@ a{color:var(--accent)}
   overflow:hidden;
   pointer-events:none;
   background:
-    radial-gradient(120vmax 62vmax at 50% -18%, rgba(62,99,84,.24), transparent 62%),
-    linear-gradient(165deg,#151e1f 0%,#101617 52%,#0d1213 100%);
+    radial-gradient(100vmax 68vmax at 78% 0%,var(--ambient-cyan),transparent 62%),
+    radial-gradient(82vmax 66vmax at 10% 92%,var(--ambient-purple),transparent 66%),
+    var(--bg);
 }
 .scene-grid{
   position:absolute;
@@ -53,8 +55,8 @@ a{color:var(--accent)}
   bottom:-24vmax;
   opacity:.9;
   background-image:
-    linear-gradient(to right,rgba(169,232,204,.10) 1px,transparent 1px),
-    linear-gradient(to bottom,rgba(169,232,204,.10) 1px,transparent 1px);
+    linear-gradient(to right,var(--grid-line) 1px,transparent 1px),
+    linear-gradient(to bottom,var(--grid-line) 1px,transparent 1px);
   background-size:64px 64px;
   -webkit-mask-image:radial-gradient(ellipse 95% 82% at 50% 44%,#000 0%,rgba(0,0,0,.55) 55%,transparent 82%);
   mask-image:radial-gradient(ellipse 95% 82% at 50% 44%,#000 0%,rgba(0,0,0,.55) 55%,transparent 82%);
@@ -67,11 +69,10 @@ a{color:var(--accent)}
 .page{
   position:relative;
   z-index:1;
-  height:100vh;
-  height:100dvh;
+  min-height:100vh;
+  min-height:100dvh;
   display:flex;
   flex-direction:column;
-  overflow:hidden;
 }
 .topbar{
   display:flex;
@@ -79,10 +80,13 @@ a{color:var(--accent)}
   justify-content:space-between;
   padding:26px clamp(20px,5vw,48px);
 }
+.theme-toggle{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:9px 13px;border:1px solid var(--glass-border);border-radius:10px;background:var(--bg);color:var(--text);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.theme-toggle:hover{background:var(--bg);border-color:var(--accent)}
+.theme-toggle [data-theme-icon]{font-size:18px;line-height:1}
 .brand{
   display:inline-flex;
   align-items:center;
-  color:#e9efef;
+  color:var(--text);
   text-decoration:none;
 }
 .brand-text strong{
@@ -97,10 +101,10 @@ a{color:var(--accent)}
   margin-top:3px;
   font-size:9px;
   letter-spacing:.08em;
-  color:#92a3a4;
+  color:var(--muted);
 }
 .side-note{
-  color:#748788;
+  color:var(--muted);
   font-size:11px;
   letter-spacing:2.4px;
   text-transform:uppercase;
@@ -118,6 +122,13 @@ main{
   display:flex;
   flex-direction:column;
   align-items:center;
+  padding:clamp(28px,5vw,56px);
+  border:1px solid var(--glass-border);
+  border-radius:28px;
+  background:var(--panel);
+  -webkit-backdrop-filter:blur(18px) saturate(125%);
+  backdrop-filter:blur(18px) saturate(125%);
+  box-shadow:0 24px 80px var(--glass-shadow);
   animation:hero-in .5s ease-out both;
 }
 h1{
@@ -136,7 +147,7 @@ h1 .no-break{
 .lead{
   max-width:600px;
   margin:24px 0 0;
-  color:#c0cecf;
+  color:var(--text-secondary);
   font-size:clamp(15px,1.4vw,17px);
   line-height:1.8;
   animation:hero-in .5s ease-out .15s both;
@@ -157,20 +168,20 @@ h1 .no-break{
   min-height:52px;
   padding:0 24px;
   border-radius:12px;
-  background:var(--accent);
-  border:1px solid var(--accent);
-  color:var(--on-accent);
+  background:var(--action-bg);
+  border:1px solid var(--action-bg);
+  color:var(--on-action);
   font-size:16px;
   font-weight:650;
   line-height:1;
   text-decoration:none;
-  box-shadow:0 16px 46px rgba(169,232,204,.12);
+  box-shadow:0 16px 46px var(--glass-shadow);
   transition:background .15s ease-out,transform .15s ease-out,box-shadow .15s ease-out;
 }
 .cta svg{
   width:17px;
   height:17px;
-  stroke:var(--on-accent);
+  stroke:var(--on-action);
   stroke-width:2;
   fill:none;
   stroke-linecap:round;
@@ -178,16 +189,16 @@ h1 .no-break{
   transition:transform .15s ease-out;
 }
 .cta:hover{
-  background:var(--accent-hover);
-  border-color:var(--accent-hover);
+  background:var(--action-bg);
+  border-color:var(--action-bg);
   transform:translateY(-1px);
-  box-shadow:0 20px 56px rgba(169,232,204,.16);
+  box-shadow:0 20px 56px var(--glass-shadow);
 }
 .cta:hover svg{transform:translateX(3px)}
 .cta:active{transform:translateY(0)}
 .hint{
   margin:16px 0 0;
-  color:#92a3a4;
+  color:var(--muted);
   font-size:12px;
   line-height:1.7;
 }
@@ -195,7 +206,7 @@ h1 .no-break{
 .page-footer{
   padding:18px clamp(20px,5vw,48px) 26px;
   text-align:center;
-  color:#748788;
+  color:var(--muted);
   font-size:11px;
   letter-spacing:1.8px;
   text-transform:uppercase;
@@ -211,12 +222,15 @@ h1 .no-break{
 /* Small screens -------------------------------------------------------------- */
 @media (max-width:700px){
   .topbar{padding-top:20px}
+  .topbar{gap:12px}
   .side-note{display:none}
   main{padding-top:6px;padding-bottom:30px}
   h1{font-size:clamp(34px,11.2vw,40px);line-height:1.3}
   .lead{margin-top:18px;line-height:1.75}
   .action{margin-top:34px}
   .page-footer{font-size:9px;letter-spacing:1.4px}
+  .copy{padding:30px 22px;border-radius:22px}
+  .theme-toggle{min-height:42px;padding:7px 10px;font-size:12px}
 }
 @media (max-width:360px){
   h1{font-size:33px}
@@ -248,6 +262,7 @@ h1 .no-break{
       </span>
     </a>
     <span class="side-note">本地谱面服务</span>
+    <button type="button" class="theme-toggle" data-theme-toggle aria-label="切换到深色模式"><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>深色模式</span></button>
   </header>
 
   <main>
@@ -275,6 +290,29 @@ h1 .no-break{
 'use strict';
 (function () {
   var root = document.documentElement;
+  var themeKey = 'phira-color-scheme';
+  function currentTheme() {
+    return root.dataset.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  }
+  function syncThemeButtons() {
+    var active = currentTheme();
+    var nextLabel = active === 'dark' ? '浅色模式' : '深色模式';
+    document.querySelectorAll('[data-theme-toggle]').forEach(function (button) {
+      var icon = button.querySelector('[data-theme-icon]');
+      var label = button.querySelector('[data-theme-label]');
+      button.setAttribute('aria-label', '切换到' + nextLabel);
+      if (icon) icon.textContent = active === 'dark' ? '☼' : '☾';
+      if (label) label.textContent = nextLabel;
+    });
+  }
+  document.querySelectorAll('[data-theme-toggle]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      root.dataset.theme = currentTheme() === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem(themeKey, root.dataset.theme); } catch (_) {}
+      syncThemeButtons();
+    });
+  });
+  syncThemeButtons();
   var reduceQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   if (reduceQuery.matches || !window.matchMedia('(pointer: fine)').matches) return;
 

@@ -8,6 +8,16 @@ export const PRIVATE_CHART_MIN_ID = -2_147_483_648;
 export const PRIVATE_CHART_MAX_ID = 2_147_483_647;
 export const PRIVATE_UPLOADER_ID = 0;
 export const PRIVATE_CHART_NAME = "Private Chart";
+export const PRIVATE_CHART_ZIP_MAX_ENTRIES = 1024;
+export const PRIVATE_CHART_ZIP_MAX_ENTRY_BYTES = 128 * 1024 * 1024;
+export const PRIVATE_CHART_ZIP_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+
+export class ZipSizeLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ZipSizeLimitError";
+  }
+}
 
 type IllustrationExtension = "jpg" | "jpeg" | "png";
 type AudioExtension = "mp3" | "ogg" | "wav";
@@ -75,6 +85,22 @@ type PackageFiles = {
   info?: string;
 };
 
+type ZipBudget = { used: number };
+
+type ZipEntryMetadata = {
+  name: string;
+  flags: number;
+  compression: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localOffset: number;
+};
+
+type PreparedPackage = {
+  packageFile: Buffer;
+  assets: PackageFiles;
+};
+
 const FALLBACK_LINE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 function crc32(data: Buffer): number {
@@ -87,48 +113,62 @@ function crc32(data: Buffer): number {
 }
 
 function createStoredZip(entries: Map<string, Buffer>): Buffer {
-  const localParts: Buffer[] = [];
-  const centralParts: Buffer[] = [];
+  const records = [...entries].map(([entryName, data]) => ({
+    name: Buffer.from(entryName.replace(/\\/g, "/"), "utf8"),
+    data,
+    checksum: crc32(data),
+  }));
+  const localSize = records.reduce((size, record) => size + 30 + record.name.length + record.data.length, 0);
+  const centralSize = records.reduce((size, record) => size + 46 + record.name.length, 0);
+  const output = Buffer.allocUnsafe(localSize + centralSize + 22);
   let offset = 0;
-  for (const [entryName, data] of entries) {
-    const name = Buffer.from(entryName.replace(/\\/g, "/"), "utf8");
-    const checksum = crc32(data);
-    const local = Buffer.alloc(30 + name.length);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0x800, 6);
-    local.writeUInt16LE(0, 8);
-    local.writeUInt32LE(checksum, 14);
-    local.writeUInt32LE(data.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(name.length, 26);
-    name.copy(local, 30);
-    localParts.push(Buffer.concat([local, data]));
+  let centralOffset = localSize;
+  for (const { name, data, checksum } of records) {
+    output.writeUInt32LE(0x04034b50, offset);
+    output.writeUInt16LE(20, offset + 4);
+    output.writeUInt16LE(0x800, offset + 6);
+    output.writeUInt16LE(0, offset + 8);
+    output.writeUInt16LE(0, offset + 10);
+    output.writeUInt16LE(0, offset + 12);
+    output.writeUInt32LE(checksum, offset + 14);
+    output.writeUInt32LE(data.length, offset + 18);
+    output.writeUInt32LE(data.length, offset + 22);
+    output.writeUInt16LE(name.length, offset + 26);
+    output.writeUInt16LE(0, offset + 28);
+    name.copy(output, offset + 30);
+    data.copy(output, offset + 30 + name.length);
+    const localSizeForEntry = 30 + name.length + data.length;
 
-    const central = Buffer.alloc(46 + name.length);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0x800, 8);
-    central.writeUInt16LE(0, 10);
-    central.writeUInt32LE(checksum, 16);
-    central.writeUInt32LE(data.length, 20);
-    central.writeUInt32LE(data.length, 24);
-    central.writeUInt16LE(name.length, 28);
-    central.writeUInt32LE(offset, 42);
-    name.copy(central, 46);
-    centralParts.push(central);
-    offset += local.length + data.length;
+    output.writeUInt32LE(0x02014b50, centralOffset);
+    output.writeUInt16LE(20, centralOffset + 4);
+    output.writeUInt16LE(20, centralOffset + 6);
+    output.writeUInt16LE(0x800, centralOffset + 8);
+    output.writeUInt16LE(0, centralOffset + 10);
+    output.writeUInt16LE(0, centralOffset + 12);
+    output.writeUInt16LE(0, centralOffset + 14);
+    output.writeUInt32LE(checksum, centralOffset + 16);
+    output.writeUInt32LE(data.length, centralOffset + 20);
+    output.writeUInt32LE(data.length, centralOffset + 24);
+    output.writeUInt16LE(name.length, centralOffset + 28);
+    output.writeUInt16LE(0, centralOffset + 30);
+    output.writeUInt16LE(0, centralOffset + 32);
+    output.writeUInt16LE(0, centralOffset + 34);
+    output.writeUInt16LE(0, centralOffset + 36);
+    output.writeUInt32LE(0, centralOffset + 38);
+    output.writeUInt32LE(offset, centralOffset + 42);
+    name.copy(output, centralOffset + 46);
+    centralOffset += 46 + name.length;
+    offset += localSizeForEntry;
   }
-  const localData = Buffer.concat(localParts);
-  const centralData = Buffer.concat(centralParts);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.size, 8);
-  end.writeUInt16LE(entries.size, 10);
-  end.writeUInt32LE(centralData.length, 12);
-  end.writeUInt32LE(localData.length, 16);
-  return Buffer.concat([localData, centralData, end]);
+  output.writeUInt32LE(0x06054b50, centralOffset);
+  output.writeUInt16LE(0, centralOffset + 4);
+  output.writeUInt16LE(0, centralOffset + 6);
+  output.writeUInt16LE(records.length, centralOffset + 8);
+  output.writeUInt16LE(records.length, centralOffset + 10);
+  output.writeUInt32LE(centralSize, centralOffset + 12);
+  output.writeUInt32LE(localSize, centralOffset + 16);
+  output.writeUInt16LE(0, centralOffset + 20);
+  return output;
 }
 
 function yamlQuote(value: string): string {
@@ -158,8 +198,7 @@ function generatedInfoYml(info: string, entries: Map<string, Buffer>): string {
   ].join("\n");
 }
 
-function normalizePackageForClient(packageFile: Buffer): Buffer {
-  const entries = zipEntries(packageFile);
+function normalizePackageForClient(packageFile: Buffer, entries: Map<string, Buffer>): Buffer {
   if (entries.size === 0) return packageFile;
   const names = [...entries.keys()];
   const lowerNames = new Set(names.map((name) => name.toLocaleLowerCase()));
@@ -187,41 +226,158 @@ function normalizePackageForClient(packageFile: Buffer): Buffer {
   return changed ? createStoredZip(entries) : packageFile;
 }
 
-function zipEntries(packageFile: Buffer): Map<string, Buffer> {
-  const entries = new Map<string, Buffer>();
-  const end = packageFile.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-  if (end < 0 || end + 22 > packageFile.length) return entries;
+function zipDirectory(packageFile: Buffer): ZipEntryMetadata[] | null {
+  const endSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  let end = packageFile.lastIndexOf(endSignature);
+  while (end >= 0) {
+    if (end + 22 <= packageFile.length) {
+      const commentLength = packageFile.readUInt16LE(end + 20);
+      if (end + 22 + commentLength === packageFile.length) break;
+    }
+    end = packageFile.lastIndexOf(endSignature, end - 1);
+  }
+  // Keep the existing support for arbitrary non-ZIP packages used by older clients.
+  if (end < 0) return null;
+
+  const invalid = (): never => { throw new Error("invalid ZIP package"); };
+  if (end + 22 > packageFile.length || packageFile.readUInt32LE(end) !== 0x06054b50) return invalid();
+  const diskNumber = packageFile.readUInt16LE(end + 4);
+  const directoryDisk = packageFile.readUInt16LE(end + 6);
+  const diskCount = packageFile.readUInt16LE(end + 8);
   const count = packageFile.readUInt16LE(end + 10);
+  const directorySize = packageFile.readUInt32LE(end + 12);
   const directoryOffset = packageFile.readUInt32LE(end + 16);
+  if (count > PRIVATE_CHART_ZIP_MAX_ENTRIES || diskCount > PRIVATE_CHART_ZIP_MAX_ENTRIES) {
+    throw new ZipSizeLimitError(`ZIP 条目数超过上限（${PRIVATE_CHART_ZIP_MAX_ENTRIES}）`);
+  }
+  if (diskNumber !== 0 || directoryDisk !== 0 || diskCount !== count) return invalid();
+  if (end >= 20 && packageFile.readUInt32LE(end - 20) === 0x07064b50) {
+    throw new Error("ZIP64 package sizes are not supported");
+  }
+  if (directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
+    throw new Error("ZIP64 package sizes are not supported");
+  }
+  if (directoryOffset + directorySize > end || directoryOffset > packageFile.length) return invalid();
+
+  const metadata: ZipEntryMetadata[] = [];
+  const directoryEnd = directoryOffset + directorySize;
   let cursor = directoryOffset;
+  let declaredTotal = 0;
   for (let index = 0; index < count; index += 1) {
-    if (cursor + 46 > packageFile.length || packageFile.readUInt32LE(cursor) !== 0x02014b50) break;
+    if (cursor + 46 > directoryEnd || packageFile.readUInt32LE(cursor) !== 0x02014b50) return invalid();
     const flags = packageFile.readUInt16LE(cursor + 8);
     const compression = packageFile.readUInt16LE(cursor + 10);
     const compressedSize = packageFile.readUInt32LE(cursor + 20);
+    const uncompressedSize = packageFile.readUInt32LE(cursor + 24);
     const nameLength = packageFile.readUInt16LE(cursor + 28);
     const extraLength = packageFile.readUInt16LE(cursor + 30);
     const commentLength = packageFile.readUInt16LE(cursor + 32);
+    const startDisk = packageFile.readUInt16LE(cursor + 34);
     const localOffset = packageFile.readUInt32LE(cursor + 42);
-    const nameStart = cursor + 46;
-    const name = packageFile.subarray(nameStart, nameStart + nameLength).toString(flags & 0x800 ? "utf8" : "utf8");
-    cursor = nameStart + nameLength + extraLength + commentLength;
+    const recordEnd = cursor + 46 + nameLength + extraLength + commentLength;
+    if (recordEnd > directoryEnd) return invalid();
+    if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff || startDisk === 0xffff) {
+      throw new Error("ZIP64 package sizes are not supported");
+    }
+    if (startDisk !== 0) return invalid();
+    let extraCursor = cursor + 46 + nameLength;
+    const extraEnd = extraCursor + extraLength;
+    while (extraCursor + 4 <= extraEnd) {
+      const extraId = packageFile.readUInt16LE(extraCursor);
+      const extraSize = packageFile.readUInt16LE(extraCursor + 2);
+      if (extraCursor + 4 + extraSize > extraEnd) return invalid();
+      if (extraId === 0x0001) throw new Error("ZIP64 package sizes are not supported");
+      extraCursor += 4 + extraSize;
+    }
+    if (extraCursor !== extraEnd) return invalid();
+
+    if (uncompressedSize > PRIVATE_CHART_ZIP_MAX_ENTRY_BYTES) {
+      throw new ZipSizeLimitError(`ZIP 单条目解压后超过上限（128 MiB）`);
+    }
+    declaredTotal += uncompressedSize;
+    if (declaredTotal > PRIVATE_CHART_ZIP_MAX_TOTAL_BYTES) {
+      throw new ZipSizeLimitError("ZIP 解压后总量超过上限（256 MiB）");
+    }
+
+    if (localOffset + 30 > directoryOffset || packageFile.readUInt32LE(localOffset) !== 0x04034b50) return invalid();
+    const localCompressedSize = packageFile.readUInt32LE(localOffset + 18);
+    const localUncompressedSize = packageFile.readUInt32LE(localOffset + 22);
+    const localNameLength = packageFile.readUInt16LE(localOffset + 26);
+    const localExtraLength = packageFile.readUInt16LE(localOffset + 28);
+    if (localCompressedSize === 0xffffffff || localUncompressedSize === 0xffffffff) {
+      throw new Error("ZIP64 package sizes are not supported");
+    }
+    let localExtraCursor = localOffset + 30 + localNameLength;
+    const localExtraEnd = localExtraCursor + localExtraLength;
+    if (localExtraEnd > directoryOffset) return invalid();
+    while (localExtraCursor + 4 <= localExtraEnd) {
+      const extraId = packageFile.readUInt16LE(localExtraCursor);
+      const extraSize = packageFile.readUInt16LE(localExtraCursor + 2);
+      if (localExtraCursor + 4 + extraSize > localExtraEnd) return invalid();
+      if (extraId === 0x0001) throw new Error("ZIP64 package sizes are not supported");
+      localExtraCursor += 4 + extraSize;
+    }
+    if (localExtraCursor !== localExtraEnd) return invalid();
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const dataEnd = dataStart + compressedSize;
+    if (dataStart > directoryOffset || dataEnd > directoryOffset || dataEnd < dataStart) return invalid();
+    const name = packageFile.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8");
+    metadata.push({ name, flags, compression, compressedSize, uncompressedSize, localOffset });
+    cursor = recordEnd;
+  }
+  return metadata;
+}
+
+function zipEntries(packageFile: Buffer, budget: ZipBudget = { used: 0 }, directory = zipDirectory(packageFile)): Map<string, Buffer> {
+  const entries = new Map<string, Buffer>();
+  if (!directory) return entries;
+  const declaredTotal = directory.reduce((total, entry) => total + entry.uncompressedSize, 0);
+  if (budget.used + declaredTotal > PRIVATE_CHART_ZIP_MAX_TOTAL_BYTES) {
+    throw new ZipSizeLimitError("ZIP 解压后总量超过上限（256 MiB）");
+  }
+
+  for (const entry of directory) {
+    const { name, compression, compressedSize, uncompressedSize, localOffset } = entry;
     if (!name || name.endsWith("/") || name.includes("..")) continue;
-    if (localOffset + 30 > packageFile.length || packageFile.readUInt32LE(localOffset) !== 0x04034b50) continue;
     const localNameLength = packageFile.readUInt16LE(localOffset + 26);
     const localExtraLength = packageFile.readUInt16LE(localOffset + 28);
     const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-    const dataEnd = dataStart + compressedSize;
-    if (dataStart < 0 || dataEnd > packageFile.length) continue;
-    const compressed = packageFile.subarray(dataStart, dataEnd);
+    const compressed = packageFile.subarray(dataStart, dataStart + compressedSize);
+    const remaining = PRIVATE_CHART_ZIP_MAX_TOTAL_BYTES - budget.used;
+    const allowed = Math.min(PRIVATE_CHART_ZIP_MAX_ENTRY_BYTES, remaining);
+    let content: Buffer | null = null;
     try {
-      const content = compression === 0 ? compressed : compression === 8 ? inflateRawSync(compressed) : null;
-      if (content) entries.set(name.replace(/\\/g, "/"), content);
-    } catch {
+      if (compression === 0) {
+        content = compressed;
+      } else if (compression === 8) {
+        content = inflateRawSync(compressed, { maxOutputLength: allowed + 1 });
+      }
+      if (content) {
+        if (content.length > PRIVATE_CHART_ZIP_MAX_ENTRY_BYTES) {
+          throw new ZipSizeLimitError("ZIP 单条目实际解压后超过上限（128 MiB）");
+        }
+        if (content.length > remaining) {
+          throw new ZipSizeLimitError("ZIP 解压后实际总量超过上限（256 MiB）");
+        }
+        budget.used += content.length;
+        if (content.length === uncompressedSize) entries.set(name.replace(/\\/g, "/"), content);
+      }
+    } catch (error) {
+      if (error instanceof ZipSizeLimitError) throw error;
+      if (error instanceof RangeError) {
+        const limit = remaining <= PRIVATE_CHART_ZIP_MAX_ENTRY_BYTES ? "ZIP 解压后总量超过上限（256 MiB）" : "ZIP 单条目实际解压后超过上限（128 MiB）";
+        throw new ZipSizeLimitError(limit);
+      }
       // A malformed optional entry should not make the whole package path unsafe.
     }
   }
   return entries;
+}
+
+function preparePackage(packageFile: Buffer, budget: ZipBudget): PreparedPackage {
+  const entries = zipEntries(packageFile, budget);
+  const clientPackage = normalizePackageForClient(packageFile, entries);
+  return { packageFile: clientPackage, assets: packageAssets(entries) };
 }
 
 /**
@@ -280,8 +436,7 @@ function zipEntryNames(filePath: string): string[] | null {
   return names;
 }
 
-function packageAssets(packageFile: Buffer): PackageFiles {
-  const entries = zipEntries(packageFile);
+function packageAssets(entries: Map<string, Buffer>): PackageFiles {
   const names = [...entries.keys()];
   const findName = (predicate: (name: string) => boolean): string | undefined => names.find(predicate);
   const find = (predicate: (name: string) => boolean): Buffer | undefined => {
@@ -451,9 +606,10 @@ export class PrivateChartStore {
       }
       try {
         const originalPackage = fs.readFileSync(packagePath);
-        const clientPackage = normalizePackageForClient(originalPackage);
+        const parsedEntries = zipEntries(originalPackage);
+        const clientPackage = normalizePackageForClient(originalPackage, parsedEntries);
         if (clientPackage !== originalPackage) fs.writeFileSync(packagePath, clientPackage);
-        const extracted = packageAssets(clientPackage);
+        const extracted = packageAssets(parsedEntries);
         if (extracted.illustration) {
           const extension = extracted.illustrationExtension || "jpg";
           fs.mkdirSync(directory, { recursive: true });
@@ -545,8 +701,21 @@ export class PrivateChartStore {
     if (!isPrivateChartId(id)) throw new Error("id must be in the private chart range");
     if (this.get(id)) throw new Error("chart id already exists");
     if (this.idAvailable && !this.idAvailable(id)) throw new Error("Chart ID is already used by another instance");
-    const clientPackage = normalizePackageForClient(files.packageFile);
-    const extracted = packageAssets(clientPackage);
+    const prepared = preparePackage(files.packageFile, { used: 0 });
+    return this.createPrepared(input, files, prepared);
+  }
+
+  private createPrepared(input: Partial<PrivateChartDefinition>, files: PrivateChartUploadFiles, prepared: PreparedPackage): PrivateChartDefinition {
+    if (!Buffer.isBuffer(files.packageFile) || files.packageFile.length === 0) {
+      throw new Error("chart package is required");
+    }
+    const requestedId = input.id === undefined ? undefined : Number(input.id);
+    const id = requestedId === undefined || !Number.isSafeInteger(requestedId) ? this.nextId() : requestedId;
+    if (!isPrivateChartId(id)) throw new Error("id must be in the private chart range");
+    if (this.get(id)) throw new Error("chart id already exists");
+    if (this.idAvailable && !this.idAvailable(id)) throw new Error("Chart ID is already used by another instance");
+    const clientPackage = prepared.packageFile;
+    const extracted = prepared.assets;
     const packageName = infoValue(extracted.info, "name");
     const packageLevel = infoValue(extracted.info, "level");
     const packageDifficulty = infoValue(extracted.info, "difficulty");
@@ -598,24 +767,47 @@ export class PrivateChartStore {
   }
 
   importCollection(collectionFile: Buffer): { created: PrivateChartDefinition[]; skipped: Record<string, string>[] } | null {
-    const entries = zipEntries(collectionFile);
-    const candidates = [...entries.entries()].filter(([name]) => {
+    const directory = zipDirectory(collectionFile);
+    if (!directory) return null;
+    const candidates = directory.filter(({ name }) => {
       const normalized = name.replace(/\\/g, "/");
       return !normalized.includes("/") && /^#-?\d+(?:_|)(.+)\.(pez|zip)$/i.test(normalized);
     });
     if (candidates.length === 0) return null;
 
-    const created: PrivateChartDefinition[] = [];
-    const skipped: Record<string, string>[] = [];
-    for (const [entryName, packageFile] of candidates) {
+    const budget: ZipBudget = { used: 0 };
+    const entries = zipEntries(collectionFile, budget, directory);
+    const prepared: { entryName: string; input: Partial<PrivateChartDefinition>; packageFile: Buffer; result?: PreparedPackage; error?: string }[] = [];
+    for (const candidate of candidates) {
+      const entryName = candidate.name.replace(/\\/g, "/");
       const match = /^#(-?\d+)(?:_|)(.+)\.(pez|zip)$/i.exec(entryName);
       if (!match) continue;
       const id = Number(match[1]);
       const fallbackName = match[2].replace(/[_]+/g, " ").trim();
+      const packageFile = entries.get(entryName);
+      if (!packageFile) {
+        prepared.push({ entryName, input: { id, name: fallbackName }, packageFile: Buffer.alloc(0), error: "package entry could not be read" });
+        continue;
+      }
       try {
-        created.push(this.create({ id, name: fallbackName }, { packageFile }));
+        prepared.push({ entryName, input: { id, name: fallbackName }, packageFile, result: preparePackage(packageFile, budget) });
       } catch (error) {
-        skipped.push({ file: entryName, error: error instanceof Error ? error.message : String(error) });
+        if (error instanceof ZipSizeLimitError) throw error;
+        prepared.push({ entryName, input: { id, name: fallbackName }, packageFile, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    const created: PrivateChartDefinition[] = [];
+    const skipped: Record<string, string>[] = [];
+    for (const item of prepared) {
+      if (!item.result) {
+        skipped.push({ file: item.entryName, error: item.error || "package entry could not be read" });
+        continue;
+      }
+      try {
+        created.push(this.createPrepared(item.input, { packageFile: item.packageFile }, item.result));
+      } catch (error) {
+        skipped.push({ file: item.entryName, error: error instanceof Error ? error.message : String(error) });
       }
     }
     return { created, skipped };

@@ -10,7 +10,8 @@ import { phiraThemeCss } from "./ui-theme";
 export function adminUi(): string {
   return String.raw`<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Phira 本地谱面管理系统</title>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Phira 本地谱面管理系统</title>
+<script>(function(){try{var theme=localStorage.getItem('phira-color-scheme');if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme}catch(_){}})();</script>
 <style>${phiraThemeCss()}${adminBaseCss()}${adminDesignCss()}</style></head>
 <body>${adminAuthMarkup()}${adminWorkspaceMarkup()}${adminDialogMarkup()}
 <script>${adminClient()}</script></body></html>`;

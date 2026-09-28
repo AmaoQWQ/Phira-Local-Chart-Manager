@@ -22,6 +22,7 @@
     "status:pmp": "node scripts/pmp-process-control.js status",
     "test:multiplayer": "npm run build && node scripts/test-multiplayer.js",
     "test:rating": "npm run build && node scripts/test-private-rating.js",
+    "test:private-zip": "npm run build && node --expose-gc scripts/test-private-zip-limits.js && node scripts/test-private-zip-http.js",
     "test:instances": "npm run build && node scripts/test-instances.js",
     "test:visibility": "npm run build && node scripts/test-instance-visibility.js",
     "test:policy": "npm run build && node scripts/test-admin-policy.js",

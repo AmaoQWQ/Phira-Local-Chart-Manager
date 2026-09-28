@@ -20,6 +20,8 @@ import {
   privateUploaderMetadata,
   PRIVATE_CHART_ID,
   PRIVATE_UPLOADER_ID,
+  PRIVATE_CHART_ZIP_MAX_TOTAL_BYTES,
+  ZipSizeLimitError,
 } from "./private-chart";
 import {
   privateUploadChartId,
@@ -46,7 +48,8 @@ import {
 
 const MAX_BODY_PREVIEW_BYTES = 4096;
 const MAX_PROXY_BODY_BYTES = 16 * 1024 * 1024;
-const MAX_ADMIN_BODY_BYTES = 768 * 1024 * 1024;
+// Leave room for ZIP headers and multipart framing above the 256 MiB extracted cap.
+const MAX_ADMIN_BODY_BYTES = PRIVATE_CHART_ZIP_MAX_TOTAL_BYTES + 4 * 1024 * 1024;
 const PROFILE_CACHE_MS = 10 * 60 * 1000;
 const DOC_FILES: Record<string, string> = {
   user: "USER.md",
@@ -93,10 +96,12 @@ function readBody(
     });
     request.on("end", () => {
       if (tooLarge) {
+        chunks.length = 0;
         reject(new Error(`request body exceeds ${maxBytes} bytes`));
         return;
       }
       const data = Buffer.concat(chunks);
+      chunks.length = 0;
       resolve({
         size,
         data,
@@ -1482,9 +1487,14 @@ function makeRequestHandler(
       // Parser errors may contain submitted passwords or tokens; do not log their text.
       process.stderr.write(adminRequest ? "Admin request failed\n" : "Request handling failed\n");
       if (!response.headersSent) {
-        const tooLarge = error instanceof Error && error.message.startsWith("request body exceeds");
+        const bodyTooLarge = error instanceof Error && error.message.startsWith("request body exceeds");
+        const zipTooLarge = error instanceof ZipSizeLimitError;
+        const tooLarge = bodyTooLarge || zipTooLarge;
         const statusCode = tooLarge ? 413 : adminRequest ? 400 : 502;
-        json(response, { ok: false, error: adminRequest ? "invalid admin request" : "upstream request failed" }, statusCode);
+        const message = zipTooLarge || bodyTooLarge
+          ? error.message
+          : adminRequest ? "invalid admin request" : "upstream request failed";
+        json(response, { ok: false, error: message }, statusCode);
       } else {
         response.destroy();
       }
