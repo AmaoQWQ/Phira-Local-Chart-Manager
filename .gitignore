@@ -37,7 +37,7 @@ mp-server/
 
 # Local deployment handoff notes may contain machine-specific operational details.
 DESIGN.md
-docs/handoff*.md
+docs/*handoff*.md
 docs/monitor-plan*.md
 
 *.sqlite
