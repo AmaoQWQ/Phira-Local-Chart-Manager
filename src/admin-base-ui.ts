@@ -14,8 +14,8 @@ export function adminBaseCss(): string {
 #docDialog{width:min(480px,calc(100% - 32px))}
 .doc-options{display:flex;flex-direction:column;gap:10px}
 .doc-option{display:flex;flex-direction:column;align-items:flex-start;gap:5px;text-align:left}
-.doc-option strong{font-size:14px;color:#e9efef}
-.doc-option small{font-size:12px;color:#92a3a4;line-height:1.6}
+.doc-option strong{font-size:14px;color:var(--text)}
+.doc-option small{font-size:12px;color:var(--muted);line-height:1.6}
 .topbar{position:sticky;top:0;z-index:8;background:rgba(16,22,23,.92);backdrop-filter:blur(6px)}
 #docContent{max-width:1180px;line-height:1.8;font-size:14px;overflow-wrap:anywhere}
 #docContent>*{margin-top:0}
